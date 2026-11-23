@@ -171,10 +171,25 @@ void SKimodoPreview::Seek(float Seconds)
 		Mesh->MarkRenderDynamicDataDirty();
 	}
 	Scene.GetWorld()->SendAllEndOfFrameUpdates();
+	FollowTarget();
 	if (const TSharedPtr<FEditorViewportClient> PreviewClient = GetViewportClient())
 	{
 		PreviewClient->Invalidate();
 	}
+}
+
+void SKimodoPreview::FollowTarget()
+{
+	if (FollowBone.IsNone() || Length <= 0.0f || !Mesh->GetSkeletalMeshAsset()) return;
+
+	const FVector Location = Mesh->GetBoneIndex(FollowBone) != INDEX_NONE
+		? Mesh->GetBoneLocation(FollowBone)
+		: Mesh->Bounds.Origin;
+
+	// 높이는 그대로 두어 걷기·점프할 때 카메라가 위아래로 흔들리지 않게 한다.
+	CameraTarget.X = Location.X;
+	CameraTarget.Y = Location.Y;
+	UpdateCamera();
 }
 
 void SKimodoPreview::TogglePlay()

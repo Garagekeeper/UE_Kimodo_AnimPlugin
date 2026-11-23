@@ -1,4 +1,4 @@
-from base64 import b64decode
+from base64 import b64decode, b64encode
 import json
 import math
 import os
@@ -22,6 +22,8 @@ ASSETS = u.get_editor_subsystem(u.EditorAssetSubsystem)
 retarget = runpy.run_path(str(SCRIPTS / "retarget.py"))["retarget"]
 direct_description = runpy.run_path(str(SCRIPTS / "interpret.py"))["direct_description"]
 HANGUL = re.compile(r"[ᄀ-ᇿ㄰-㆏가-힣]")
+TEXT_ENCODER_DEVICES = ("cpu", "cuda", "auto")
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def selected_agents(config):
@@ -95,6 +97,16 @@ def resolve_target(config):
     return target, generate_ik_rig(target), None, "auto-generated IK Rig"
 
 
+def import_and_retarget(glb, staging, target, rig, align_bones, retargeter):
+    """glTF 가져오기와 리타게팅. 에셋 작업이라 게임 스레드에서만 돌 수 있으므로 진행 창을 띄워 멈춘 것처럼 보이지 않게 한다."""
+    with u.ScopedSlowTask(2, "Importing the Kimodo motion…") as task:
+        task.make_dialog(False)
+        task.enter_progress_frame(1, "Importing the Kimodo motion…")
+        mesh, motion = import_gltf(glb, staging + "/Source")
+        task.enter_progress_frame(1, f"Retargeting to {target.get_name()}…")
+        return retarget(ASSETS, mesh, motion, target, rig, staging, list(align_bones or []), retargeter)
+
+
 def import_gltf(path, destination):
     task = u.AssetImportTask()
     task.set_editor_properties({
@@ -157,13 +169,27 @@ def model_downloaded(cache, repo):
     return False
 
 
+# Python 경로별 "kimodo를 실제로 찾을 수 있는가" 결과. 세션마다 한 번만 확인하고, 설치가 끝나면 비운다.
+_import_checks = {}
+
+
 def kimodo_installed(python):
-    if python.parent.name.lower() not in ("scripts", "bin"):
-        # venv가 아닌 Python을 직접 지정하면 설치 여부를 확인하지 않는다.
-        return True
-    root = python.parent.parent
-    packages = list(root.glob("Lib/site-packages/kimodo")) + list(root.glob("lib/python*/site-packages/kimodo"))
-    return bool(packages)
+    """venv의 Python이 실제로 실행되고 kimodo를 찾는지 확인한다.
+
+    폴더만 보면 엔진을 옮기거나 업그레이드해 venv의 기반 Python이 사라져도 ready로 보인다.
+    find_spec은 torch를 불러오지 않아 빠르다."""
+    key = str(python).lower()
+    if key not in _import_checks:
+        try:
+            result = subprocess.run(
+                [str(python), "-c", "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('kimodo') else 1)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=NO_WINDOW, timeout=30,
+            )
+            _import_checks[key] = result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            _import_checks[key] = False
+    return _import_checks[key]
 
 
 def setup_state(config):
@@ -211,6 +237,8 @@ class Panel:
         self.english_prompt = ""
         self.message = "Choose a target mesh, then enter a motion prompt and duration."
         self.restored = False
+        # 다시 가져와야 하는 직전 미리보기(glTF). 에디터 시작을 막지 않도록 버튼을 눌렀을 때만 복원한다.
+        self.restorable = None
 
     @staticmethod
     def last_preview_file(work_dir):
@@ -224,7 +252,9 @@ class Panel:
         except OSError as error:
             u.log_warning(f"Could not save Kimodo last preview metadata: {error}")
 
-    def restore_last_preview(self, config):
+    def check_last_preview(self, config):
+        """첫 poll에서 호출한다. 저장된 클립은 불러오기만 하면 되므로 바로 복원하고,
+        glTF를 다시 가져와야 하는 미리보기는 '직전 미리보기 복원' 버튼으로 미룬다."""
         work_dir = config.get("work_dir")
         if not work_dir:
             return
@@ -248,23 +278,32 @@ class Panel:
                 self.message = f"Restored saved clip · {saved_path}"
                 return
 
+        if Path(data.get("glb") or "").is_file():
+            self.restorable = data
+            self.message = "The previous preview can be restored. Click Restore last preview."
+
+    def restore_last_preview(self, config):
+        data = self.restorable
+        if self.process is not None or not data:
+            return
+        self.restorable = None
+
         glb = Path(data.get("glb") or "")
         if not glb.is_file():
-            return
+            raise FileNotFoundError(f"The previous preview file {glb} no longer exists.")
         target, rig, retargeter, rig_label = resolve_target(data)
         output_folder = data.get("output_folder") or config.get("output_folder") or "/Game/Kimodo"
         staging = f"{output_folder}/_Preview_Restored_{uuid4().hex[:8]}"
         try:
-            mesh, motion = import_gltf(glb, staging + "/Source")
-            clip = retarget(ASSETS, mesh, motion, target, rig, staging,
-                            list(data.get("align_bones") or []), retargeter)
+            clip = import_and_retarget(glb, staging, target, rig, data.get("align_bones"), retargeter)
             if clip.get_editor_property("skeleton") != target.get_editor_property("skeleton"):
-                self.delete_staging(staging)
-                return
+                raise RuntimeError(f"Retargeting did not produce an animation for {target.get_name()}.")
             clip.set_preview_skeletal_mesh(target)
         except Exception:
             self.delete_staging(staging)
             raise
+
+        self.discard_preview()
 
         self.preview = clip
         self.saved_clip = None
@@ -325,9 +364,13 @@ class Panel:
             "staging": config["output_folder"] + "/_Preview_" + job_id, "started": time.monotonic(),
             "duration": duration, "seed": seed,
         }
+        # Llama 3 8B 텍스트 인코더 위치. GPU는 VRAM이 16 GB 이상일 때만 의미가 있어 기본은 CPU(RAM 약 32 GB).
+        device = (config.get("text_encoder_device") or "cpu").lower()
+        if device not in TEXT_ENCODER_DEVICES:
+            device = "cpu"
         env = dict(
             os.environ, HF_HUB_CACHE=str(cache), HF_HUB_OFFLINE="1",
-            TEXT_ENCODER_MODE="local", TEXT_ENCODER_DEVICE="cpu", PYTHONUNBUFFERED="1",
+            TEXT_ENCODER_MODE="local", TEXT_ENCODER_DEVICE=device, PYTHONUNBUFFERED="1",
         )
         self.job.update(python=python, env=env)
         self.job["previous_interpretation"] = self.interpretation
@@ -433,6 +476,7 @@ class Panel:
         if stage == "Setup":
             progress = self.setup_progress()
             self.job = None
+            _import_checks.clear()
             if status:
                 detail = progress.get("message") or f"exited with code {status}"
                 raise RuntimeError(f"Setup failed: {detail} (log: {folder / 'Setup.log'})")
@@ -460,11 +504,9 @@ class Panel:
     def create_preview(self):
         staging = self.job["staging"]
         target = self.job["target"]
-        source_path = staging + "/Source"
         try:
-            mesh, motion = import_gltf(self.job["folder"] / "SOMA_Motion.glb", source_path)
-            clip = retarget(ASSETS, mesh, motion, target, self.job["rig"], staging,
-                            self.job["align_bones"], self.job["retargeter"])
+            clip = import_and_retarget(self.job["folder"] / "SOMA_Motion.glb", staging, target, self.job["rig"],
+                                       self.job["align_bones"], self.job["retargeter"])
             if clip.get_editor_property("skeleton") != target.get_editor_property("skeleton"):
                 raise RuntimeError(f"Retargeting did not produce an animation for {target.get_name()}.")
             clip.set_preview_skeletal_mesh(target)
@@ -473,6 +515,7 @@ class Panel:
             raise
 
         self.discard_preview()
+        self.restorable = None
         self.preview = clip
         self.saved_clip = None
         self.preview_dir = staging
@@ -501,15 +544,16 @@ class Panel:
         # 해석 단계의 CLI처럼 자식 프로세스가 남지 않도록 프로세스 트리 전체를 종료한다.
         process = self.process
         if os.name == "nt":
+            # taskkill /F는 종료를 마친 뒤 돌아오므로 아래 대기는 짧게 둔다(에디터 메인 스레드).
             subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(process.pid)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=NO_WINDOW, timeout=10,
             )
         else:
             process.kill()
         try:
-            process.wait(timeout=10)
+            process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             u.log_warning(f"Kimodo process {process.pid} did not exit after cancellation.")
 
@@ -584,7 +628,9 @@ u.register_python_shutdown_callback(shutdown)
 
 
 def dispatch(encoded_payload):
-    """C++ 패널의 요청(JSON)을 처리하고 상태 한 줄을 출력한다."""
+    """C++ 패널의 요청(JSON)을 처리하고 상태 한 줄을 Base64로 돌려준다.
+
+    print로 넘기면 0.5초마다 Output Log에 한 줄씩 쌓이므로, C++이 평가 결과(CommandResult)로 받는다."""
     payload = json.loads(b64decode(encoded_payload).decode("utf-8"))
     action = payload.get("action", "poll")
     value = payload.get("value", "")
@@ -596,10 +642,12 @@ def dispatch(encoded_payload):
             if not panel.restored and panel.process is None and panel.preview is None and panel.saved_clip is None:
                 panel.restored = True
                 try:
-                    panel.restore_last_preview(payload)
+                    panel.check_last_preview(payload)
                 except Exception as restore_error:
                     u.log_warning(f"Could not restore previous Kimodo preview: {restore_error}")
             panel.poll()
+        elif action == "restore":
+            panel.restore_last_preview(payload)
         elif action == "save":
             panel.save(value, payload)
         elif action == "cancel":
@@ -625,5 +673,8 @@ def dispatch(encoded_payload):
     path = clip.get_path_name() if clip else ""
     interpretation = panel.interpretation.replace("|", "/")
     english = panel.english_prompt.replace("|", "/").replace("\n", " ")
-    print(f"KIMODO_PANEL|{int(panel.process is not None)}|{int(panel.preview is not None)}|"
-          f"{message}|{path}|{int(bool(panel.previous_motion))}|{interpretation}|{english}|{setup.replace('|', '/')}")
+    restorable = int(panel.restorable is not None and panel.process is None)
+    line = (f"{int(panel.process is not None)}|{int(panel.preview is not None)}|"
+            f"{message}|{path}|{int(bool(panel.previous_motion))}|{interpretation}|{english}|"
+            f"{setup.replace('|', '/')}|{restorable}")
+    return b64encode(line.encode("utf-8")).decode("ascii")

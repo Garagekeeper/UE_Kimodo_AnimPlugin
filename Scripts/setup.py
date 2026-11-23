@@ -5,6 +5,7 @@ Hugging Face 토큰은 환경변수 HF_TOKEN으로만 받는다. 없으면 `hf a
 이미 끝난 단계는 건너뛰므로 여러 번 실행해도 된다.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -22,7 +23,12 @@ import zipfile
 KIMODO_COMMIT = "e1c219c99b4b94ba48be1fb6a1cbc64ecee4c954"
 KIMODO_ARCHIVE = f"https://github.com/nv-tlabs/kimodo/archive/{KIMODO_COMMIT}.zip"
 TORCH_REQUIREMENT = "torch==2.11.0"
-TORCH_INDEX = os.environ.get("KIMODO_TORCH_INDEX", "https://download.pytorch.org/whl/cu128")
+TORCH_INDEX_CUDA = "https://download.pytorch.org/whl/cu128"
+TORCH_INDEX_CPU = "https://download.pytorch.org/whl/cpu"
+# Wheels/ 폴더에 동봉한 사전 빌드 휠의 SHA256. 휠을 다시 빌드하면 여기도 갱신한다.
+PREBUILT_WHEEL_SHA256 = {
+    "kimodo-1.0.0-cp311-cp311-win_amd64.whl": "5929457e2e413c051a310cdd39aab6b74994a633073305f83bcc5c6db76daeee",
+}
 LLAMA = "meta-llama/Meta-Llama-3-8B-Instruct"
 LLAMA_LICENSE_URL = "https://huggingface.co/" + LLAMA
 TEXT_ENCODER_REPOS = [
@@ -149,12 +155,22 @@ def create_venv(python, progress):
         raise SetupError("Could not create the Python virtual environment.")
 
 
+def torch_index():
+    """KIMODO_TORCH_INDEX가 있으면 그 값, 없으면 NVIDIA 드라이버(nvidia-smi)가 있을 때만 CUDA 빌드를 쓴다."""
+    override = os.environ.get("KIMODO_TORCH_INDEX", "").strip()
+    if override:
+        return override
+    return TORCH_INDEX_CUDA if shutil.which("nvidia-smi") else TORCH_INDEX_CPU
+
+
 def install_torch(python, progress):
-    progress.begin("Installing PyTorch (about 3 GB)...")
+    index = torch_index()
+    cuda = index == TORCH_INDEX_CUDA
+    progress.begin("Installing PyTorch (about 3 GB)..." if cuda else "Installing PyTorch (CPU build, no NVIDIA GPU found)...")
     if can_import(python, "torch"):
         return
     if run([python, "-m", "pip", "install", "--disable-pip-version-check", TORCH_REQUIREMENT,
-            "--index-url", TORCH_INDEX]):
+            "--index-url", index]):
         raise SetupError("PyTorch installation failed. See Setup.log.")
 
 
@@ -325,13 +341,30 @@ def find_prebuilt_wheel():
     return None
 
 
+def wheel_hash_ok(wheel):
+    """동봉 휠이 커밋한 파일과 같은지 확인한다. LFS 포인터만 받았거나 바뀐 파일이면 소스 빌드로 넘어간다."""
+    expected = PREBUILT_WHEEL_SHA256.get(wheel.name)
+    if not expected:
+        print(f"No pinned SHA256 for {wheel.name}; skipping the pre-built wheel.", flush=True)
+        return False
+    digest = hashlib.sha256()
+    with open(wheel, "rb") as data:
+        for chunk in iter(lambda: data.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
+        print(f"SHA256 mismatch for {wheel.name} (run `git lfs pull` in the plugin folder); "
+              "skipping the pre-built wheel.", flush=True)
+        return False
+    return True
+
+
 def install_kimodo(python, progress):
     progress.begin("Installing Kimodo...")
     if can_import(python, "kimodo"):
         return
 
     prebuilt = find_prebuilt_wheel()
-    if prebuilt is not None:
+    if prebuilt is not None and wheel_hash_ok(prebuilt):
         print(f"Installing Kimodo from pre-built wheel: {prebuilt}", flush=True)
         if run([python, "-m", "pip", "install", "--disable-pip-version-check", prebuilt]) == 0:
             return
@@ -363,9 +396,13 @@ def install_kimodo(python, progress):
         )
 
 
-def download_model(python, cache, repo, ignore, progress, label):
+def download_model(python, cache, repo, ignore, progress, label, token):
     progress.begin(f"Downloading {label}...")
-    code = run([python, "-c", DOWNLOAD_SNIPPET, repo, cache, json.dumps(ignore)])
+    # 토큰은 모델 다운로드 프로세스에만 넘긴다(pip, CMake, git에는 넘기지 않음).
+    env = os.environ.copy()
+    if token:
+        env["HF_TOKEN"] = token
+    code = run([python, "-c", DOWNLOAD_SNIPPET, repo, cache, json.dumps(ignore)], env=env)
     if code == 3:
         raise SetupError(f"Access to {repo} was denied. Accept its license at https://huggingface.co/{repo}.")
     if code:
@@ -381,20 +418,19 @@ def main():
     try:
         # 토큰이 필요하면 다운로드 전에 먼저 확인해 몇 GB를 받은 뒤 실패하지 않게 한다.
         progress.begin("Checking Llama 3 access...")
-        token = os.environ.get("HF_TOKEN", "").strip() or saved_token()
-        if token:
-            os.environ["HF_TOKEN"] = token
+        # 이 프로세스의 환경에서 토큰을 빼 두어 pip·CMake·git 같은 하위 프로세스로 퍼지지 않게 한다.
+        token = os.environ.pop("HF_TOKEN", "").strip() or saved_token()
         if not (Path(python).is_file() and llama_downloaded(python, cache)):
             check_llama_access(token)
 
         create_venv(python, progress)
         install_torch(python, progress)
         install_kimodo(python, progress)
-        download_model(python, cache, f"nvidia/{model}", [], progress, f"the {model} model")
+        download_model(python, cache, f"nvidia/{model}", [], progress, f"the {model} model", token)
         for repo, ignore in TEXT_ENCODER_REPOS:
             # Llama 본체(약 15 GB)와 LLM2Vec 어댑터 두 개
             label = "Llama 3 8B (about 15 GB)" if repo == LLAMA else repo.split("/")[1]
-            download_model(python, cache, repo, ignore, progress, label)
+            download_model(python, cache, repo, ignore, progress, label, token)
         progress.write(f"Kimodo is installed ({int(time.monotonic() - started)}s).", state="done")
     except SetupError as error:
         progress.write(str(error), state="failed")

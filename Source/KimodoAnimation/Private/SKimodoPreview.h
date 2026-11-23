@@ -39,6 +39,8 @@ protected:
 private:
 	void Seek(float Seconds);
 	void UpdateCamera();
+	/** 재생 중 카메라 중심을 FollowBone(없으면 메시 경계 중심)의 수평 위치로 옮긴다. */
+	void FollowTarget();
 	UDebugSkelMeshComponent* Mesh = nullptr;
 	FName FollowBone;
 	FVector CameraTarget = FVector(0, 0, 92);

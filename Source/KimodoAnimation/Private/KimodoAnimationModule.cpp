@@ -360,6 +360,15 @@ public:
 						.Visibility_Lambda([this] { return bBusy && IsReady() ? EVisibility::Visible : EVisibility::Collapsed; })
 						.OnClicked_Lambda([this] { return RunAction(TEXT("cancel")); })
 					]
+					// 에디터 시작을 막지 않도록 직전 미리보기(glTF 다시 가져오기)는 눌렀을 때만 복원한다.
+					+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("Restore", "Restore last preview"))
+						.ToolTipText(LOCTEXT("RestoreTip", "Re-import and retarget the preview from the previous session."))
+						.Visibility_Lambda([this] { return bCanRestore && !bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
+						.OnClicked_Lambda([this] { return RunAction(TEXT("restore")); })
+					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
 				[
@@ -486,6 +495,10 @@ private:
 		Payload->SetStringField(TEXT("bootstrap_python"), GetBootstrapPython());
 		Payload->SetStringField(TEXT("work_dir"), ResolveLocalPath(TEXT("KIMODO_WORK_DIR"), TEXT("ECLIPSE_KIMODO_WORK_DIR"), UserSettings->WorkingDirectory.Path, DefaultWorkDir));
 		Payload->SetArrayField(TEXT("agents"), ToJsonArray(Agents));
+		Payload->SetStringField(TEXT("text_encoder_device"),
+			UserSettings->TextEncoderDevice == EKimodoTextEncoderDevice::CUDA ? TEXT("cuda")
+			: UserSettings->TextEncoderDevice == EKimodoTextEncoderDevice::Auto ? TEXT("auto")
+			: TEXT("cpu"));
 
 		FString Json;
 		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Json);
@@ -514,15 +527,24 @@ private:
 		const FString Script = FPaths::ConvertRelativePathToFull(Plugin->GetBaseDir() / TEXT("Scripts/panel.py"));
 		const FString EncodedScript = FBase64::Encode(Script);
 		const FString EncodedPayload = FBase64::Encode(MakePayload(Action, Value, DurationValue));
-		FPythonCommandEx Command;
-		Command.FileExecutionScope = EPythonFileExecutionScope::Public;
-		Command.Flags = EPythonCommandFlags::Unattended;
-		Command.Command = FString::Printf(
+
+		// 1) 패널 스크립트를 한 번만 불러 둔다.
+		FPythonCommandEx Load;
+		Load.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+		Load.FileExecutionScope = EPythonFileExecutionScope::Public;
+		Load.Flags = EPythonCommandFlags::Unattended;
+		Load.Command = FString::Printf(
 			TEXT("import base64, runpy\n")
 			TEXT("if 'kimodo_animation_panel' not in globals():\n")
-			TEXT("    kimodo_animation_panel = runpy.run_path(base64.b64decode('%s').decode('utf-8'))\n")
-			TEXT("kimodo_animation_panel['dispatch']('%s')"),
-			*EncodedScript, *EncodedPayload);
+			TEXT("    kimodo_animation_panel = runpy.run_path(base64.b64decode('%s').decode('utf-8'))\n"),
+			*EncodedScript);
+
+		// 2) 요청을 처리하고 상태 한 줄(Base64)을 평가 결과로 받는다. print를 쓰지 않아 Output Log에 쌓이지 않는다.
+		FPythonCommandEx Command;
+		Command.ExecutionMode = EPythonCommandExecutionMode::EvaluateStatement;
+		Command.FileExecutionScope = EPythonFileExecutionScope::Public;
+		Command.Flags = EPythonCommandFlags::Unattended;
+		Command.Command = FString::Printf(TEXT("kimodo_animation_panel['dispatch']('%s')"), *EncodedPayload);
 
 		const bool bSaving = FCString::Strcmp(Action, TEXT("save")) == 0;
 		const float PreviousTime = Preview->GetTime();
@@ -532,20 +554,23 @@ private:
 			// 저장 후 Python이 임시 에셋을 정리하기 전에 컴포넌트 참조를 해제한다.
 			Preview->SetClip(nullptr);
 		}
-		if (Python->ExecPythonCommandEx(Command))
+		FString Line;
+		if (Python->ExecPythonCommandEx(Load) && Python->ExecPythonCommandEx(Command) && DecodeStatusLine(Command.CommandResult, Line))
 		{
-			for (const FPythonLogOutputEntry& Entry : Command.LogOutput)
 			{
-				FString Line = Entry.Output;
-				if (!Line.RemoveFromStart(TEXT("KIMODO_PANEL|"))) continue;
-
 				TArray<FString> Fields;
 				Line.ParseIntoArray(Fields, TEXT("|"), false);
-				if (Fields.Num() != 8) continue;
+				if (Fields.Num() != 9)
+				{
+					bBusy = false;
+					Status = LOCTEXT("PythonMismatch", "The Kimodo panel script and plugin do not match. Restart the editor.");
+					return FReply::Handled();
+				}
 
 				bBusy = Fields[0] == TEXT("1");
 				bHasPreview = Fields[1] == TEXT("1");
 				bCanRevise = Fields[4] == TEXT("1");
+				bCanRestore = Fields[8] == TEXT("1");
 
 				// 설치 상태: installing, ready, missing:<빠진 항목>
 				const FString SetupField = Fields[7].TrimStartAndEnd();
@@ -613,6 +638,20 @@ private:
 		return FReply::Handled();
 	}
 
+	/** EvaluateStatement 결과는 Python repr('...')이므로 따옴표를 벗기고 Base64(UTF-8)를 푼다. */
+	static bool DecodeStatusLine(const FString& Result, FString& OutLine)
+	{
+		FString Encoded = Result.TrimStartAndEnd();
+		if (Encoded.Len() < 2 || !(Encoded.StartsWith(TEXT("'")) && Encoded.EndsWith(TEXT("'")))) return false;
+		Encoded = Encoded.Mid(1, Encoded.Len() - 2);
+
+		TArray<uint8> Bytes;
+		if (!FBase64::Decode(Encoded, Bytes)) return false;
+		const FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num());
+		OutLine = FString::ConstructFromPtrSize(Converted.Get(), Converted.Length());
+		return true;
+	}
+
 	EActiveTimerReturnType Poll(double CurrentTime, float DeltaTime)
 	{
 		// 에디터가 복원한 탭은 Python 초기화보다 먼저 열릴 수 있다.
@@ -649,6 +688,7 @@ private:
 	bool bBusy = false;
 	bool bHasPreview = false;
 	bool bCanRevise = false;
+	bool bCanRestore = false;
 };
 }
 

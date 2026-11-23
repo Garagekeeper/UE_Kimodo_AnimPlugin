@@ -9,6 +9,18 @@ class UIKRetargeter;
 class UIKRigDefinition;
 class USkeletalMesh;
 
+/** Llama 3 8B 텍스트 인코더를 돌릴 장치 (Kimodo의 TEXT_ENCODER_DEVICE). */
+UENUM()
+enum class EKimodoTextEncoderDevice : uint8
+{
+	/** 시스템 RAM 약 32 GB. 느리지만 어느 PC에서나 동작한다. */
+	CPU,
+	/** VRAM 16 GB 이상인 NVIDIA GPU. 부족하면 생성이 메모리 부족으로 실패한다. */
+	CUDA,
+	/** CUDA를 쓸 수 있으면 GPU, 아니면 CPU (VRAM 크기는 확인하지 않음). */
+	Auto
+};
+
 /** 프로젝트 전체가 공유하는 Kimodo 기본값 (DefaultEditor.ini). */
 UCLASS(Config = Editor, DefaultConfig, meta = (DisplayName = "Kimodo Animation"))
 class KIMODOANIMATION_API UKimodoSettings : public UDeveloperSettings
@@ -76,4 +88,8 @@ public:
 	/** 프롬프트를 다듬을 CLI 순서(codex, claude, gemini). 비우면 환경변수 KIMODO_AGENTS를 읽고, 그것도 없으면 프롬프트를 그대로 쓴다. */
 	UPROPERTY(Config, EditAnywhere, Category = "Interpretation")
 	TArray<FString> InterpretAgents;
+
+	/** Llama 3 8B 텍스트 인코더 장치. 기본 CPU(RAM 약 32 GB). GPU는 VRAM 16 GB 이상일 때만 고른다. */
+	UPROPERTY(Config, EditAnywhere, Category = "Generation")
+	EKimodoTextEncoderDevice TextEncoderDevice = EKimodoTextEncoderDevice::CPU;
 };

@@ -43,5 +43,13 @@ git lfs pull
 ## 주요 기능
 
 - **상단 크기 조절 가능한 3D 프리뷰 + 하단 스크롤 컨트롤**: 좌클릭 드래그 회전, 휠 줌, `Reset Camera`, 블러 없는 선명한 프리뷰
-- **세션 간 마지막 프리뷰 자동 복원**: 에디터를 재시작해도 직전 프리뷰(또는 저장된 클립)가 일시정지 상태로 자동 복원됨 (`Saved/Kimodo/last_preview.json`)
+- **세션 간 마지막 프리뷰 복원**: 저장한 클립은 에디터를 다시 열면 바로 복원됩니다. 저장하지 않은 프리뷰는 glTF를 다시 가져와야 해서 에디터 시작을 막지 않도록 **`Restore last preview`** 버튼을 눌렀을 때만 복원합니다 (`Saved/Kimodo/last_preview.json`)
+- **카메라 추적**: 재생 중 프리뷰 카메라가 `PreviewFollowBone`(기본 `pelvis`, 없으면 메시 중심)을 수평으로 따라갑니다. 비우면 고정 카메라
 - **힌트 자동 완성**: 비어 있는 프롬프트/수정 입력란에서 `Tab` 키를 누르면 예시 힌트 문장이 그대로 입력됨
+
+## 생성 장치와 메모리
+
+- Llama 3 8B 텍스트 인코더는 기본적으로 **CPU**에서 돌아갑니다 (시스템 RAM 약 32 GB 권장, 느림).
+- VRAM 16 GB 이상인 NVIDIA GPU라면 `Project Settings > Plugins > Kimodo Animation (Local) > Text Encoder Device`를 `CUDA`나 `Auto`로 바꾸면 빨라집니다. VRAM이 부족하면 생성이 메모리 부족으로 실패합니다.
+- 설치 시 `nvidia-smi`가 없으면 CPU용 PyTorch를 받습니다. 직접 고르려면 환경변수 `KIMODO_TORCH_INDEX`에 PyTorch 인덱스 URL을 지정합니다.
+- 동봉 휠은 `setup.py`에 고정한 SHA256과 다르면 쓰지 않고 소스 빌드로 넘어갑니다 (LFS 파일을 받지 않았을 때 등).
