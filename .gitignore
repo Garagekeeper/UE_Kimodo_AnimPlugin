@@ -1,0 +1,21 @@
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Visual Studio / IDE
+.vs/
+*.sln
+*.slnx
+*.suo
+*.user
+*.pdb
+*.exp
+*.lib
+*.dll
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.pyo

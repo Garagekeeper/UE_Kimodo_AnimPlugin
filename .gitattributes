@@ -1,0 +1,2 @@
+# Pre-built Python wheels (Git LFS)
+*.whl filter=lfs diff=lfs merge=lfs -text
