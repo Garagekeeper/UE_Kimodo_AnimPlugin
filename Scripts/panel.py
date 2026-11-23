@@ -209,6 +209,22 @@ def setup_state(config):
     return "ready", ""
 
 
+def last_log_line(path, limit=140):
+    """진행 중인 단계 로그의 마지막 줄. tqdm 진행바는 \\r로 갱신되므로 \\r도 줄바꿈으로 본다."""
+    try:
+        with open(path, "rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 4096))
+            text = log.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in reversed(re.split(r"[\r\n]+", text)):
+        line = line.strip()
+        if line:
+            return line if len(line) <= limit else line[:limit - 1] + "…"
+    return ""
+
+
 def folder_size_gb(path):
     total = 0
     for root, _, files in os.walk(path):
@@ -468,8 +484,15 @@ class Panel:
                 size = folder_size_gb(self.job["cache"])
                 self.message = (f"Setup {step} · {progress.get('message', 'Starting…')} · "
                                 f"models {size:.1f} GB · {elapsed}s elapsed")
+                latest = last_log_line(folder / "Setup.log")
+                if latest:
+                    self.message += f"\n{latest}"
                 return
             self.message = f"{stage} · {self.job['duration']:g}s clip · {elapsed}s elapsed…"
+            # 실제로 진행 중인지 보이도록 단계 로그의 마지막 줄을 함께 보여 준다.
+            latest = last_log_line(folder / (stage + ".log"))
+            if latest:
+                self.message += f"\n{latest}"
             return
 
         self.process = None
@@ -668,7 +691,8 @@ def dispatch(encoded_payload):
     else:
         state, missing = setup_state(payload)
         setup = state if state == "ready" else f"missing:{missing}"
-    message = panel.message.replace("|", "/").replace("\n", " ")
+    # 상태 줄은 Base64로 넘기므로 줄바꿈은 그대로 두고 필드 구분자만 바꾼다.
+    message = panel.message.replace("|", "/")
     clip = panel.preview or panel.saved_clip
     path = clip.get_path_name() if clip else ""
     interpretation = panel.interpretation.replace("|", "/")

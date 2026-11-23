@@ -27,6 +27,7 @@
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SSlider.h"
+#include "Widgets/Images/SThrobber.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSplitter.h"
@@ -415,11 +416,22 @@ public:
 						})
 					]
 				]
+				// 진행 상태: 작업 중에는 스피너와 함께 단계·경과 시간·로그 마지막 줄을 보여 준다.
 				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 16)
 				[
-					SNew(STextBlock)
-					.AutoWrapText(true)
-					.Text_Lambda([this] { return Status; })
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(0, 2, 8, 0)
+					[
+						SNew(SCircularThrobber)
+						.Radius(8.0f)
+						.Visibility_Lambda([this] { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
+					]
+					+ SHorizontalBox::Slot().FillWidth(1)
+					[
+						SNew(STextBlock)
+						.AutoWrapText(true)
+						.Text_Lambda([this] { return Status; })
+					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
 				[
