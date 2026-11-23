@@ -23,6 +23,13 @@ retarget = runpy.run_path(str(SCRIPTS / "retarget.py"))["retarget"]
 direct_description = runpy.run_path(str(SCRIPTS / "interpret.py"))["direct_description"]
 HANGUL = re.compile(r"[ᄀ-ᇿ㄰-㆏가-힣]")
 TEXT_ENCODER_DEVICES = ("cpu", "cuda", "auto")
+# 터미널 색상·커서 코드(ESC[...m 등)와 줄바꿈 외 제어 문자. Slate 글꼴에 글리프가 없어 매 프레임 경고가 난다.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+
+
+def clean_text(text):
+    return CONTROL_CHARS.sub("", ANSI_ESCAPE.sub("", text))
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -219,7 +226,7 @@ def last_log_line(path, limit=140):
     except OSError:
         return ""
     for line in reversed(re.split(r"[\r\n]+", text)):
-        line = line.strip()
+        line = clean_text(line).strip()
         if line:
             return line if len(line) <= limit else line[:limit - 1] + "…"
     return ""
@@ -345,6 +352,21 @@ class Panel:
         if not math.isfinite(duration) or duration < 0.1:
             raise ValueError("Enter a duration of at least 0.1 seconds.")
 
+        # 시드를 직접 넣으면 항상 그 값을 쓴다. 비우면 새 미리보기는 다른 변형을 뽑고,
+        # 수정은 직전 시드를 유지해 요청한 차이만 반영한다.
+        seed_text = str(config.get("seed") or "").strip()
+        if seed_text:
+            try:
+                seed = int(seed_text)
+            except ValueError:
+                raise ValueError("Enter the seed as a whole number, or leave it empty for a random seed.") from None
+            if not 0 <= seed < 2**31:
+                raise ValueError(f"Enter a seed between 0 and {2**31 - 1}.")
+        elif revision and self.seed is not None:
+            seed = self.seed
+        else:
+            seed = random.randrange(2**31)
+
         # 해석 CLI가 없으면 프롬프트를 그대로 Kimodo에 전달하므로 영어만 받는다.
         agents = selected_agents(config)
         if not agents and HANGUL.search(prompt):
@@ -358,11 +380,6 @@ class Panel:
         work_dir = Path(config["work_dir"])
 
         target, rig, retargeter, rig_label = resolve_target(config)
-
-        # 새 미리보기는 다른 변형을 뽑고, 수정은 직전 시드를 유지해 요청한 차이만 반영한다.
-        seed = random.randrange(2**31)
-        if revision and self.seed is not None:
-            seed = self.seed
 
         job_id = uuid4().hex
         jobs = work_dir / "PanelJobs"
@@ -692,13 +709,13 @@ def dispatch(encoded_payload):
         state, missing = setup_state(payload)
         setup = state if state == "ready" else f"missing:{missing}"
     # 상태 줄은 Base64로 넘기므로 줄바꿈은 그대로 두고 필드 구분자만 바꾼다.
-    message = panel.message.replace("|", "/")
+    message = clean_text(panel.message.replace("|", "/"))
     clip = panel.preview or panel.saved_clip
     path = clip.get_path_name() if clip else ""
-    interpretation = panel.interpretation.replace("|", "/")
-    english = panel.english_prompt.replace("|", "/").replace("\n", " ")
+    interpretation = clean_text(panel.interpretation.replace("|", "/"))
+    english = clean_text(panel.english_prompt.replace("|", "/").replace("\n", " "))
     restorable = int(panel.restorable is not None and panel.process is None)
     line = (f"{int(panel.process is not None)}|{int(panel.preview is not None)}|"
             f"{message}|{path}|{int(bool(panel.previous_motion))}|{interpretation}|{english}|"
-            f"{setup.replace('|', '/')}|{restorable}")
+            f"{setup.replace('|', '/')}|{restorable}|{'' if panel.seed is None else panel.seed}")
     return b64encode(line.encode("utf-8")).decode("ascii")

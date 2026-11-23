@@ -330,10 +330,48 @@ public:
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 8)
 				[
-					SAssignNew(Duration, SEditableTextBox)
-					.MinDesiredWidth(92)
-					.Text(LOCTEXT("DefaultDuration", "2.0"))
-					.IsEnabled_Lambda([this] { return !bBusy; })
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SAssignNew(Duration, SEditableTextBox)
+						.MinDesiredWidth(92)
+						.Text(LOCTEXT("DefaultDuration", "2.0"))
+						.IsEnabled_Lambda([this] { return !bBusy; })
+					]
+					// 시드: 비우면 새 생성은 랜덤, 수정은 직전 시드. 값을 넣으면 항상 그 시드로 생성한다.
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(16, 0, 6, 0)
+					[
+						SNew(STextBlock).Text(LOCTEXT("Seed", "Seed"))
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SAssignNew(Seed, SEditableTextBox)
+						.MinDesiredWidth(110)
+						.HintText(LOCTEXT("SeedHint", "random"))
+						.ToolTipText(LOCTEXT("SeedTip", "Leave empty for a random seed (revisions keep the previous one). Enter a number to reproduce a result."))
+						.IsEnabled_Lambda([this] { return !bBusy; })
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(6, 0, 0, 0)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("UseLastSeed", "Use last"))
+						.ToolTipText(LOCTEXT("UseLastSeedTip", "Fill in the seed of the current preview."))
+						.IsEnabled_Lambda([this] { return !bBusy && !LastSeed.IsEmpty(); })
+						.OnClicked_Lambda([this] {
+							Seed->SetText(FText::FromString(LastSeed));
+							return FReply::Handled();
+						})
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0, 0, 0)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("ClearSeed", "Clear"))
+						.IsEnabled_Lambda([this] { return !bBusy && !Seed->GetText().IsEmptyOrWhitespace(); })
+						.OnClicked_Lambda([this] {
+							Seed->SetText(FText::GetEmpty());
+							return FReply::Handled();
+						})
+					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 16)
 				[
@@ -496,6 +534,7 @@ private:
 		Payload->SetStringField(TEXT("action"), Action);
 		Payload->SetStringField(TEXT("value"), Value);
 		Payload->SetStringField(TEXT("duration"), DurationValue);
+		Payload->SetStringField(TEXT("seed"), Seed.IsValid() ? Seed->GetText().ToString().TrimStartAndEnd() : FString());
 		Payload->SetStringField(TEXT("target_mesh"), TargetMeshPath);
 		Payload->SetStringField(TEXT("target_rig"), TargetRigPath);
 		Payload->SetStringField(TEXT("retargeter"), RetargeterPath);
@@ -572,7 +611,7 @@ private:
 			{
 				TArray<FString> Fields;
 				Line.ParseIntoArray(Fields, TEXT("|"), false);
-				if (Fields.Num() != 9)
+				if (Fields.Num() != 10)
 				{
 					bBusy = false;
 					Status = LOCTEXT("PythonMismatch", "The Kimodo panel script and plugin do not match. Restart the editor.");
@@ -583,6 +622,7 @@ private:
 				bHasPreview = Fields[1] == TEXT("1");
 				bCanRevise = Fields[4] == TEXT("1");
 				bCanRestore = Fields[8] == TEXT("1");
+				LastSeed = Fields[9].TrimStartAndEnd();
 
 				// 설치 상태: installing, ready, missing:<빠진 항목>
 				const FString SetupField = Fields[7].TrimStartAndEnd();
@@ -684,6 +724,7 @@ private:
 
 	TSharedPtr<SMultiLineEditableTextBox> Prompt;
 	TSharedPtr<SEditableTextBox> Duration;
+	TSharedPtr<SEditableTextBox> Seed;
 	TSharedPtr<SEditableTextBox> Revision;
 	TSharedPtr<SEditableTextBox> AssetName;
 	TSharedPtr<SKimodoPreview> Preview;
@@ -692,6 +733,7 @@ private:
 	FString TargetRigPath;
 	FString RetargeterPath;
 	FString PreviewPath;
+	FString LastSeed;
 	FString SetupState;
 	FString SetupMissing;
 	FText Status;
