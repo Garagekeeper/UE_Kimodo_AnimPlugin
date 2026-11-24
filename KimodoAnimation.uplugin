@@ -1,22 +1,28 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "0.1",
+	"Version": 2,
+	"VersionName": "1.0.0",
 	"FriendlyName": "Kimodo Animation",
 	"Description": "Generate an AnimSequence for any skeletal mesh from a text motion prompt with a local Kimodo installation. The editor panel previews the retargeted clip and saves it to the project. Editor only.",
 	"Category": "Animation",
-	"CreatedBy": "",
+	"CreatedBy": "Garagekeeper",
+	"CreatedByURL": "https://github.com/Garagekeeper",
+	"DocsURL": "https://github.com/Garagekeeper/UE_Kimodo_AnimPlugin#readme",
+	"SupportURL": "https://github.com/Garagekeeper/UE_Kimodo_AnimPlugin/issues",
+	"EngineVersion": "5.8.0",
 	"CanContainContent": false,
 	"IsBetaVersion": false,
-	"IsExperimentalVersion": true,
+	"IsExperimentalVersion": false,
 	"Installed": false,
 	"EnabledByDefault": true,
+	"SupportedTargetPlatforms": ["Win64"],
 	"Modules": [
 		{
 			"Name": "KimodoAnimation",
 			"Type": "Editor",
 			"LoadingPhase": "PostEngineInit",
-			"TargetAllowList": ["Editor"]
+			"TargetAllowList": ["Editor"],
+			"PlatformAllowList": ["Win64"]
 		}
 	],
 	"Plugins": [
