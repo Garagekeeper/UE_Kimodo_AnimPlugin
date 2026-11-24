@@ -2,37 +2,54 @@
 #include "SKimodoPreview.h"
 
 #include "Animation/AnimSequence.h"
+#include "ContentBrowserModule.h"
+#include "IContentBrowserSingleton.h"
 #include "Dom/JsonObject.h"
 #include "Engine/SkeletalMesh.h"
 #include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/Notifications/NotificationManager.h"
 #include "HAL/PlatformMisc.h"
 #include "InputCoreTypes.h"
 #include "Interfaces/IPluginManager.h"
 #include "IPythonScriptPlugin.h"
 #include "Misc/Base64.h"
 #include "Misc/Paths.h"
+#include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyCustomizationHelpers.h"
 #include "Retargeter/IKRetargeter.h"
 #include "Rig/IKRigDefinition.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Styling/AppStyle.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
 #include "ToolMenus.h"
 #include "UObject/Package.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/UObjectIterator.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SComboButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SSlider.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Images/SThrobber.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SExpandableArea.h"
+#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Layout/SSplitter.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/Notifications/SProgressBar.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
 
 #define LOCTEXT_NAMESPACE "KimodoAnimation"
 
@@ -108,6 +125,66 @@ FString ToAssetPath(const FAssetData& Asset)
 	return Asset.IsValid() ? Asset.GetSoftObjectPath().ToString() : FString();
 }
 
+/** 패널의 텍스트 인코더 선택지. 프로젝트 설정의 Text Encoder Device와 같은 값이다. */
+struct FEncoderOption
+{
+	EKimodoTextEncoderDevice Value;
+	FText Label;
+	FText Tip;
+};
+
+const TArray<FEncoderOption>& GetEncoderOptions()
+{
+	static const TArray<FEncoderOption> Options = {
+		{EKimodoTextEncoderDevice::LowMemory, LOCTEXT("EncoderLowMemory", "Low memory (fast)"),
+			LOCTEXT("EncoderLowMemoryTip", "Streams Llama 3 one layer at a time on the CPU. About 1-2 GB RAM. Joint positions differ from the original by about 0.5 cm on average.")},
+		{EKimodoTextEncoderDevice::LowMemoryExact, LOCTEXT("EncoderLowMemoryExact", "Low memory (exact)"),
+			LOCTEXT("EncoderLowMemoryExactTip", "Same memory as Low memory, and results identical to the original CPU encoder. Encoding takes a little longer.")},
+		{EKimodoTextEncoderDevice::CPU, LOCTEXT("EncoderCPU", "Full model on CPU"),
+			LOCTEXT("EncoderCPUTip", "Loads the whole Llama 3 8B into RAM (about 16 GB) for every generation.")},
+		{EKimodoTextEncoderDevice::CUDA, LOCTEXT("EncoderCUDA", "Full model on GPU"),
+			LOCTEXT("EncoderCUDATip", "Needs an NVIDIA GPU with 16 GB+ VRAM. Fails with out-of-memory otherwise.")},
+		{EKimodoTextEncoderDevice::Auto, LOCTEXT("EncoderAuto", "Full model, GPU if available"),
+			LOCTEXT("EncoderAutoTip", "Uses the GPU when CUDA is available (VRAM size is not checked), else the CPU.")},
+	};
+	return Options;
+}
+
+const FEncoderOption& GetEncoderOption(EKimodoTextEncoderDevice Value)
+{
+	for (const FEncoderOption& Option : GetEncoderOptions())
+	{
+		if (Option.Value == Value) return Option;
+	}
+	return GetEncoderOptions()[0];
+}
+
+/** 패널의 테이크 목록 한 줄. Python 상태(JSON)의 takes 항목을 그대로 옮긴다. */
+struct FKimodoTake
+{
+	FString Id;
+	int32 Number = 0;
+	FString Prompt;
+	FString Seed;
+	double Duration = 0.0;
+	bool bStarred = false;
+	FString Saved;
+	FString Target;
+};
+
+/** 같은 경로의 에셋이 실제로 있는지. 지난번 고른 에셋이 지워졌으면 프로젝트 기본값으로 돌아간다. */
+bool AssetExists(const FString& Path)
+{
+	if (Path.IsEmpty()) return false;
+	const FSoftObjectPath ObjectPath(Path);
+	return ObjectPath.IsValid() && FPackageName::DoesPackageExist(ObjectPath.GetLongPackageName());
+}
+
+FString PreferLast(const FString& Last, const FString& Default)
+{
+	return AssetExists(Last) ? Last : Default;
+}
+
 class SKimodoPanel : public SCompoundWidget
 {
 public:
@@ -117,376 +194,66 @@ public:
 	void Construct(const FArguments& Args)
 	{
 		const UKimodoSettings* Settings = GetDefault<UKimodoSettings>();
-		TargetMeshPath = Settings->TargetMesh.ToSoftObjectPath().ToString();
-		TargetRigPath = Settings->TargetIKRig.ToSoftObjectPath().ToString();
-		RetargeterPath = Settings->Retargeter.ToSoftObjectPath().ToString();
+		const UKimodoUserSettings* UserSettings = GetDefault<UKimodoUserSettings>();
+		// 지난번 패널에서 고른 에셋을 먼저 쓰고, 없으면 프로젝트 설정의 기본값을 쓴다.
+		TargetMeshPath = PreferLast(UserSettings->LastTargetMesh, Settings->TargetMesh.ToSoftObjectPath().ToString());
+		TargetRigPath = UserSettings->LastTargetMesh == TargetMeshPath
+			? PreferLast(UserSettings->LastTargetIKRig, FString())
+			: Settings->TargetIKRig.ToSoftObjectPath().ToString();
+		RetargeterPath = UserSettings->LastTargetMesh == TargetMeshPath
+			? PreferLast(UserSettings->LastRetargeter, FString())
+			: Settings->Retargeter.ToSoftObjectPath().ToString();
 
 		ChildSlot
 		[
 			SNew(SSplitter)
 			.Orientation(Orient_Vertical)
-			// 상단(크기 조절 가능): 3D 프리뷰와 재생·타임라인·카메라 리셋 바
+			// 상단(크기 조절 가능): 3D 프리뷰와 재생 바
 			+ SSplitter::Slot()
 			.Value(0.45f)
 			.MinSize(160.0f)
 			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8, 8, 8, 0)
-				[
-					SAssignNew(Preview, SKimodoPreview)
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(8, 6, 8, 8)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth()
-					[
-						SNew(SButton)
-						.IsEnabled_Lambda([this] { return Preview->GetLength() > 0.0f; })
-						.Text_Lambda([this] { return Preview->IsPlaying() ? LOCTEXT("Pause", "Pause") : LOCTEXT("Play", "Play"); })
-						.OnClicked_Lambda([this] {
-							Preview->TogglePlay();
-							return FReply::Handled();
-						})
-					]
-					+ SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center).Padding(10, 0)
-					[
-						SNew(SSlider)
-						.IsEnabled_Lambda([this] { return Preview->GetLength() > 0.0f; })
-						.PreventThrottling(true)
-						.Value_Lambda([this] {
-							const float Length = Preview->GetLength();
-							return Length > 0.0f ? Preview->GetTime() / Length : 0.0f;
-						})
-						.OnValueChanged_Lambda([this](float Fraction) { Preview->Scrub(Fraction * Preview->GetLength()); })
-						.ToolTipText(LOCTEXT("Timeline", "Drag to pause and inspect a pose."))
-					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 10, 0)
-					[
-						SNew(STextBlock).Text_Lambda([this] {
-							return FText::FromString(FString::Printf(TEXT("%.2f / %.2f s"), Preview->GetTime(), Preview->GetLength()));
-						})
-					]
-					+ SHorizontalBox::Slot().AutoWidth()
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("ResetCamera", "Reset Camera"))
-						.OnClicked_Lambda([this] {
-							Preview->ResetCamera();
-							return FReply::Handled();
-						})
-					]
-				]
+				MakePreviewArea()
 			]
-			// 하단 스크롤 영역: 설치·대상 메시·프롬프트·생성·저장 컨트롤
+			// 하단: 단계별 구역(스크롤) + 항상 보이는 실행 바
 			+ SSplitter::Slot()
 			.Value(0.55f)
-			.MinSize(160.0f)
+			.MinSize(200.0f)
 			[
-				SNew(SScrollBox)
-				+ SScrollBox::Slot().Padding(16, 8, 16, 16)
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().FillHeight(1.0f)
 				[
-					SNew(SVerticalBox)
-				// 이 컴퓨터에 Kimodo가 없으면 설치 안내와 버튼을 보여 준다.
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 16)
-				[
-					SNew(SVerticalBox)
-					.Visibility_Lambda([this] {
-						if (bNeedsInitialState || IsReady()) return EVisibility::Collapsed;
-						return EVisibility::Visible;
-					})
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
+					SNew(SScrollBox)
+					+ SScrollBox::Slot().Padding(16, 8, 16, 12)
 					[
-						SNew(STextBlock)
-						.AutoWrapText(true)
-						.Text_Lambda([this] {
-							if (SetupState == TEXT("installing"))
-							{
-								return LOCTEXT("SetupRunning", "Installing Kimodo. You can keep using the editor; progress is shown below.");
-							}
-							return FText::Format(LOCTEXT("SetupMissing",
-								"Kimodo is not installed on this computer (missing {0}).\n"
-								"Install downloads PyTorch, Kimodo and the models (about 20 GB) to {1}.\n"
-								"Llama 3 needs a Hugging Face token from an account that accepted its license."),
-								FText::FromString(SetupMissing), FText::FromString(GetInstallLocationText()));
-						})
-					]
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 6)
-					[
-						SNew(SHyperlink)
-						.Text(LOCTEXT("LlamaLicense", "Open the Llama 3 license page"))
-						.OnNavigate_Lambda([] {
-							FPlatformProcess::LaunchURL(TEXT("https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct"), nullptr, nullptr);
-						})
-					]
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot().FillWidth(1)
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight()
 						[
-							SAssignNew(Token, SEditableTextBox)
-							.IsPassword(true)
-							.HintText(LOCTEXT("TokenHint", "Hugging Face token (leave empty to use a saved `hf auth login` token)"))
-							.Visibility_Lambda([this] { return bBusy ? EVisibility::Collapsed : EVisibility::Visible; })
+							MakeInstallArea()
 						]
-						+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
+						+ SVerticalBox::Slot().AutoHeight()
 						[
-							SNew(SButton)
-							.Text(LOCTEXT("Install", "Install Kimodo"))
-							.Visibility_Lambda([this] { return bBusy ? EVisibility::Collapsed : EVisibility::Visible; })
-							.OnClicked_Lambda([this] {
-								// 토큰은 설치 프로세스에만 넘기고 입력란에 남기지 않는다.
-								const FString TokenValue = Token->GetText().ToString();
-								Token->SetText(FText::GetEmpty());
-								return RunAction(TEXT("setup"), TokenValue);
-							})
+							MakeSection(LOCTEXT("SectionTarget", "Target"), MakeTargetArea())
 						]
-						+ SHorizontalBox::Slot().AutoWidth()
+						+ SVerticalBox::Slot().AutoHeight()
 						[
-							SNew(SButton)
-							.Text(LOCTEXT("CancelSetup", "Cancel install"))
-							.Visibility_Lambda([this] { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
-							.OnClicked_Lambda([this] { return RunAction(TEXT("cancel")); })
+							MakeSection(LOCTEXT("SectionPrompt", "Prompt"), MakePromptArea())
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							MakeSection(LOCTEXT("SectionTakes", "Takes"), MakeTakesArea(),
+								TAttribute<EVisibility>::CreateLambda([this] { return Takes.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; }))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							MakeSection(LOCTEXT("SectionSave", "Save"), MakeSaveArea(),
+								TAttribute<EVisibility>::CreateLambda([this] { return bHasPreview ? EVisibility::Visible : EVisibility::Collapsed; }))
 						]
 					]
 				]
-				// 생성마다 대상 캐릭터를 고를 수 있다. 기본값은 프로젝트 설정에서 읽는다.
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 16)
+				+ SVerticalBox::Slot().AutoHeight()
 				[
-					SNew(SVerticalBox)
-					.IsEnabled_Lambda([this] { return !bBusy; })
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 4)
-					[
-						SNew(STextBlock).Text(LOCTEXT("TargetMesh", "Target skeletal mesh"))
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
-					[
-						SNew(SObjectPropertyEntryBox)
-						.AllowedClass(USkeletalMesh::StaticClass())
-						.ObjectPath_Lambda([this] { return TargetMeshPath; })
-						.OnObjectChanged_Lambda([this](const FAssetData& Asset)
-						{
-							// 다른 메시의 IK Rig와 Retargeter가 남지 않도록 함께 비운다.
-							const FString NewPath = ToAssetPath(Asset);
-							if (NewPath == TargetMeshPath) return;
-
-							TargetMeshPath = NewPath;
-							TargetRigPath.Reset();
-							RetargeterPath.Reset();
-						})
-						.DisplayThumbnail(false)
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 4)
-					[
-						SNew(STextBlock)
-						.Text(LOCTEXT("TargetRig", "Target IK Rig (optional)"))
-						.ToolTipText(LOCTEXT("TargetRigTip", "Leave empty to use an IK Rig for the same skeleton, or generate one automatically."))
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
-					[
-						SNew(SObjectPropertyEntryBox)
-						.AllowedClass(UIKRigDefinition::StaticClass())
-						.ObjectPath_Lambda([this] { return TargetRigPath; })
-						.OnObjectChanged_Lambda([this](const FAssetData& Asset) { TargetRigPath = ToAssetPath(Asset); })
-						.DisplayThumbnail(false)
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 4)
-					[
-						SNew(STextBlock)
-						.Text(LOCTEXT("Retargeter", "Retargeter (optional)"))
-						.ToolTipText(LOCTEXT("RetargeterTip", "A SOMA-to-target IK Retargeter. When set, it replaces automatic chain mapping."))
-					]
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						SNew(SObjectPropertyEntryBox)
-						.AllowedClass(UIKRetargeter::StaticClass())
-						.ObjectPath_Lambda([this] { return RetargeterPath; })
-						.OnObjectChanged_Lambda([this](const FAssetData& Asset) { RetargeterPath = ToAssetPath(Asset); })
-						.DisplayThumbnail(false)
-					]
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
-				[
-					SNew(STextBlock).Text(LOCTEXT("Prompt", "동작 프롬프트 (영어)"))
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
-				[
-					SAssignNew(Prompt, SMultiLineEditableTextBox)
-					.AutoWrapText(true)
-					.HintText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"))
-					.IsEnabled_Lambda([this] { return !bBusy; })
-					.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& Event)
-					{
-						if (Event.GetKey() == EKeys::Tab && Prompt->GetText().IsEmptyOrWhitespace())
-						{
-							Prompt->SetText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"));
-							return FReply::Handled();
-						}
-						return FReply::Unhandled();
-					})
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
-				[
-					SNew(STextBlock).Text(LOCTEXT("Duration", "Duration (seconds)"))
-				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 8)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth()
-					[
-						SAssignNew(Duration, SEditableTextBox)
-						.MinDesiredWidth(92)
-						.Text(LOCTEXT("DefaultDuration", "2.0"))
-						.IsEnabled_Lambda([this] { return !bBusy; })
-					]
-					// 시드: 비우면 새 생성은 랜덤, 수정은 직전 시드. 값을 넣으면 항상 그 시드로 생성한다.
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(16, 0, 6, 0)
-					[
-						SNew(STextBlock).Text(LOCTEXT("Seed", "Seed"))
-					]
-					+ SHorizontalBox::Slot().AutoWidth()
-					[
-						SAssignNew(Seed, SEditableTextBox)
-						.MinDesiredWidth(110)
-						.HintText(LOCTEXT("SeedHint", "random"))
-						.ToolTipText(LOCTEXT("SeedTip", "Leave empty for a random seed (revisions keep the previous one). Enter a number to reproduce a result."))
-						.IsEnabled_Lambda([this] { return !bBusy; })
-					]
-					+ SHorizontalBox::Slot().AutoWidth().Padding(6, 0, 0, 0)
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("UseLastSeed", "Use last"))
-						.ToolTipText(LOCTEXT("UseLastSeedTip", "Fill in the seed of the current preview."))
-						.IsEnabled_Lambda([this] { return !bBusy && !LastSeed.IsEmpty(); })
-						.OnClicked_Lambda([this] {
-							Seed->SetText(FText::FromString(LastSeed));
-							return FReply::Handled();
-						})
-					]
-					+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0, 0, 0)
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("ClearSeed", "Clear"))
-						.IsEnabled_Lambda([this] { return !bBusy && !Seed->GetText().IsEmptyOrWhitespace(); })
-						.OnClicked_Lambda([this] {
-							Seed->SetText(FText::GetEmpty());
-							return FReply::Handled();
-						})
-					]
-				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 16)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth()
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("Generate", "새 미리보기 생성"))
-						.IsEnabled_Lambda([this] {
-							if (bNeedsInitialState || bBusy) return false;
-							if (!IsReady()) return false;
-							if (TargetMeshPath.IsEmpty()) return false;
-							return !Prompt->GetText().ToString().TrimStartAndEnd().IsEmpty();
-						})
-						.OnClicked_Lambda([this] {
-							return RunAction(TEXT("generate"), Prompt->GetText().ToString(), Duration->GetText().ToString());
-						})
-					]
-					// 해석·생성·변환 중에만 보이며 진행 중인 작업을 종료한다.
-					+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("Cancel", "중단"))
-						.ToolTipText(LOCTEXT("CancelTip", "진행 중인 생성을 중단하고 직전 미리보기를 유지합니다."))
-						.Visibility_Lambda([this] { return bBusy && IsReady() ? EVisibility::Visible : EVisibility::Collapsed; })
-						.OnClicked_Lambda([this] { return RunAction(TEXT("cancel")); })
-					]
-					// 에디터 시작을 막지 않도록 직전 미리보기(glTF 다시 가져오기)는 눌렀을 때만 복원한다.
-					+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("Restore", "Restore last preview"))
-						.ToolTipText(LOCTEXT("RestoreTip", "Re-import and retarget the preview from the previous session."))
-						.Visibility_Lambda([this] { return bCanRestore && !bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
-						.OnClicked_Lambda([this] { return RunAction(TEXT("restore")); })
-					]
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
-				[
-					SNew(STextBlock)
-					.AutoWrapText(true)
-					.Text_Lambda([this] { return Interpretation; })
-					.Visibility_Lambda([this] {
-						return Interpretation.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
-					})
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 16)
-				[
-					SNew(SHorizontalBox)
-					.Visibility_Lambda([this] {
-						return bCanRevise ? EVisibility::Visible : EVisibility::Collapsed;
-					})
-					+ SHorizontalBox::Slot().FillWidth(1)
-					[
-						SAssignNew(Revision, SEditableTextBox)
-						.HintText(LOCTEXT("RevisionHint", "Land in a deeper crouch"))
-						.IsEnabled_Lambda([this] { return !bBusy; })
-						.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& Event)
-						{
-							if (Event.GetKey() == EKeys::Tab && Revision->GetText().IsEmptyOrWhitespace())
-							{
-								Revision->SetText(LOCTEXT("RevisionHint", "Land in a deeper crouch"));
-								return FReply::Handled();
-							}
-							return FReply::Unhandled();
-						})
-					]
-					+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("Revise", "수정해 다시 생성"))
-						.IsEnabled_Lambda([this] {
-							if (bBusy || !bCanRevise) return false;
-							if (!IsReady()) return false;
-							if (TargetMeshPath.IsEmpty()) return false;
-							return !Revision->GetText().IsEmptyOrWhitespace();
-						})
-						.OnClicked_Lambda([this] {
-							return RunAction(TEXT("revise"), Revision->GetText().ToString(), Duration->GetText().ToString());
-						})
-					]
-				]
-				// 진행 상태: 작업 중에는 스피너와 함께 단계·경과 시간·로그 마지막 줄을 보여 준다.
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 16)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(0, 2, 8, 0)
-					[
-						SNew(SCircularThrobber)
-						.Radius(8.0f)
-						.Visibility_Lambda([this] { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
-					]
-					+ SHorizontalBox::Slot().FillWidth(1)
-					[
-						SNew(STextBlock)
-						.AutoWrapText(true)
-						.Text_Lambda([this] { return Status; })
-					]
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
-				[
-					SNew(STextBlock).Text(LOCTEXT("Name", "AnimSequence name"))
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
-				[
-					SAssignNew(AssetName, SEditableTextBox)
-					.Text(FText::FromString(Settings->DefaultAssetName))
-				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left)
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("Save", "Save AnimSequence"))
-					.IsEnabled_Lambda([this] { return !bBusy && bHasPreview && !AssetName->GetText().IsEmptyOrWhitespace(); })
-					.OnClicked_Lambda([this] { return RunAction(TEXT("save"), AssetName->GetText().ToString()); })
-				]
+					MakeActionBar()
 				]
 			]
 		];
@@ -496,8 +263,721 @@ public:
 		RegisterActiveTimer(0.5f, FWidgetActiveTimerDelegate::CreateSP(this, &SKimodoPanel::Poll));
 	}
 
+	/** Ctrl+Enter는 패널 어디에 포커스가 있어도 생성한다(프롬프트 칸 안에서도). */
+	virtual FReply OnPreviewKeyDown(const FGeometry& Geometry, const FKeyEvent& Event) override
+	{
+		if (Event.GetKey() == EKeys::Enter && Event.IsControlDown())
+		{
+			if (CanGenerate()) RunAction(TEXT("generate"), Prompt->GetText().ToString(), Duration->GetText().ToString());
+			return FReply::Handled();
+		}
+		return FReply::Unhandled();
+	}
+
 private:
+	// ---------------------------------------------------------------- layout
+
+	/** 번호와 제목이 있는 구역. 구역 사이에 얇은 구분선을 둔다. */
+	TSharedRef<SWidget> MakeSection(const FText& Title, const TSharedRef<SWidget>& Content,
+		TAttribute<EVisibility> Visibility = EVisibility::Visible)
+	{
+		return SNew(SVerticalBox)
+			.Visibility(Visibility)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 4)
+			[
+				SNew(STextBlock)
+				.Text(Title)
+				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(SSeparator).Thickness(1.0f)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 16)
+			[
+				Content
+			];
+	}
+
+	TSharedRef<SWidget> MakePreviewArea()
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8, 8, 8, 0)
+			[
+				SAssignNew(Preview, SKimodoPreview)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(8, 6, 8, 8)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SButton)
+					.IsEnabled_Lambda([this] { return Preview->GetLength() > 0.0f; })
+					.Text_Lambda([this] { return Preview->IsPlaying() ? LOCTEXT("Pause", "Pause") : LOCTEXT("Play", "Play"); })
+					.OnClicked_Lambda([this] {
+						Preview->TogglePlay();
+						return FReply::Handled();
+					})
+				]
+				+ SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center).Padding(10, 0)
+				[
+					SNew(SSlider)
+					.IsEnabled_Lambda([this] { return Preview->GetLength() > 0.0f; })
+					.PreventThrottling(true)
+					.Value_Lambda([this] {
+						const float Length = Preview->GetLength();
+						return Length > 0.0f ? Preview->GetTime() / Length : 0.0f;
+					})
+					.OnValueChanged_Lambda([this](float Fraction) { Preview->Scrub(Fraction * Preview->GetLength()); })
+					.ToolTipText(LOCTEXT("Timeline", "Drag to pause and inspect a pose."))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 10, 0)
+				[
+					SNew(STextBlock).Text_Lambda([this] {
+						return FText::FromString(FString::Printf(TEXT("%.2f / %.2f s"), Preview->GetTime(), Preview->GetLength()));
+					})
+				]
+				// 재생 중 카메라 추적. 기본은 꺼 두어 카메라가 사용자가 둔 자리에 머문다.
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 10, 0)
+				[
+					SNew(SCheckBox)
+					.ToolTipText(LOCTEXT("FollowTip", "Keep the camera centered on the character while it plays."))
+					.IsChecked_Lambda([this] { return Preview->IsFollowEnabled() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+					.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { Preview->SetFollowEnabled(State == ECheckBoxState::Checked); })
+					[
+						SNew(STextBlock).Text(LOCTEXT("Follow", "Follow"))
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("ResetCamera", "Reset Camera"))
+					.OnClicked_Lambda([this] {
+						Preview->ResetCamera();
+						return FReply::Handled();
+					})
+				]
+			];
+	}
+
+	/** 이 컴퓨터에 Kimodo가 없으면 설치 안내와 버튼을 보여 준다. */
+	TSharedRef<SWidget> MakeInstallArea()
+	{
+		return SNew(SVerticalBox)
+			.Visibility_Lambda([this] {
+				if (bNeedsInitialState || IsReady()) return EVisibility::Collapsed;
+				return EVisibility::Visible;
+			})
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
+			[
+				SNew(STextBlock)
+				.AutoWrapText(true)
+				.Text_Lambda([this] {
+					if (SetupState == TEXT("installing"))
+					{
+						return LOCTEXT("SetupRunning", "Installing Kimodo. You can keep using the editor; progress is shown below.");
+					}
+					return FText::Format(LOCTEXT("SetupMissing",
+						"Kimodo is not installed on this computer (missing {0}).\n"
+						"Install downloads PyTorch, Kimodo and the models (about 20 GB) to {1}.\n"
+						"Llama 3 needs a Hugging Face token from an account that accepted its license."),
+						FText::FromString(SetupMissing), FText::FromString(GetInstallLocationText()));
+				})
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 6)
+			[
+				SNew(SHyperlink)
+				.Text(LOCTEXT("LlamaLicense", "Open the Llama 3 license page"))
+				.OnNavigate_Lambda([] {
+					FPlatformProcess::LaunchURL(TEXT("https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct"), nullptr, nullptr);
+				})
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 16)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1)
+				[
+					SAssignNew(Token, SEditableTextBox)
+					.IsPassword(true)
+					.HintText(LOCTEXT("TokenHint", "Hugging Face token (leave empty to use a saved `hf auth login` token)"))
+					.Visibility_Lambda([this] { return bBusy ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("Install", "Install Kimodo"))
+					.Visibility_Lambda([this] { return bBusy ? EVisibility::Collapsed : EVisibility::Visible; })
+					.OnClicked_Lambda([this] {
+						// 토큰은 설치 프로세스에만 넘기고 입력란에 남기지 않는다.
+						const FString TokenValue = Token->GetText().ToString();
+						Token->SetText(FText::GetEmpty());
+						return RunAction(TEXT("setup"), TokenValue);
+					})
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("CancelSetup", "Cancel install"))
+					.Visibility_Lambda([this] { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
+					.OnClicked_Lambda([this] { return RunAction(TEXT("cancel")); })
+				]
+			];
+	}
+
+	/** 1. 대상: 세 에셋을 썸네일과 함께 한 줄에 둔다. 고른 값은 다음에 패널을 열 때도 유지한다. */
+	TSharedRef<SWidget> MakeTargetArea()
+	{
+		return SNew(SHorizontalBox)
+			.IsEnabled_Lambda([this] { return !bBusy; })
+			+ SHorizontalBox::Slot().FillWidth(1).Padding(0, 0, 8, 0)
+			[
+				MakeAssetPicker(LOCTEXT("TargetMesh", "Target mesh"),
+					LOCTEXT("TargetMeshTip", "Skeletal mesh the generated motion is retargeted to."),
+					USkeletalMesh::StaticClass(), &TargetMeshPath, true)
+			]
+			+ SHorizontalBox::Slot().FillWidth(1).Padding(0, 0, 8, 0)
+			[
+				MakeAssetPicker(LOCTEXT("TargetRig", "IK Rig (optional)"),
+					LOCTEXT("TargetRigTip", "Leave empty to use an IK Rig for the same skeleton, or generate one automatically."),
+					UIKRigDefinition::StaticClass(), &TargetRigPath, false)
+			]
+			+ SHorizontalBox::Slot().FillWidth(1)
+			[
+				MakeAssetPicker(LOCTEXT("Retargeter", "Retargeter (optional)"),
+					LOCTEXT("RetargeterTip", "A SOMA-to-target IK Retargeter. When set, it replaces automatic chain mapping."),
+					UIKRetargeter::StaticClass(), &RetargeterPath, false)
+			];
+	}
+
+	/** 2. 프롬프트와 길이. 시드와 텍스트 인코더는 거의 바꾸지 않으므로 Advanced에 접어 둔다. */
+	TSharedRef<SWidget> MakePromptArea()
+	{
+		return SNew(SVerticalBox)
+			.IsEnabled_Lambda([this] { return !bBusy; })
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 4)
+			[
+				SAssignNew(Prompt, SMultiLineEditableTextBox)
+				.AutoWrapText(true)
+				.HintText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"))
+				.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& Event)
+				{
+					if (Event.GetKey() == EKeys::Tab && Prompt->GetText().IsEmptyOrWhitespace())
+					{
+						Prompt->SetText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"));
+						return FReply::Handled();
+					}
+					return FReply::Unhandled();
+				})
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("PromptKeys", "English. Tab fills the example, Ctrl+Enter generates."))
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 8)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("Duration", "Duration"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SAssignNew(Duration, SEditableTextBox)
+					.MinDesiredWidth(64)
+					.Text(LOCTEXT("DefaultDuration", "2.0"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4, 0, 0, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("Seconds", "s"))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SExpandableArea)
+				.AreaTitle(LOCTEXT("Advanced", "Advanced"))
+				.InitiallyCollapsed(true)
+				.Padding(FMargin(0, 6, 0, 0))
+				.BodyContent()
+				[
+					SNew(SVerticalBox)
+					// 시드: 비우면 새 생성은 랜덤, 수정은 고른 테이크의 시드. 값을 넣으면 항상 그 시드로 생성한다.
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 6)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+						[
+							SNew(SBox).MinDesiredWidth(90)[SNew(STextBlock).Text(LOCTEXT("Seed", "Seed"))]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SAssignNew(Seed, SEditableTextBox)
+							.MinDesiredWidth(110)
+							.HintText(LOCTEXT("SeedHint", "random"))
+							.ToolTipText(LOCTEXT("SeedTip", "Leave empty for a random seed (revisions keep the selected take's seed). Enter a number to reproduce a result."))
+						]
+						+ SHorizontalBox::Slot().AutoWidth().Padding(6, 0, 0, 0)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("UseLastSeed", "Use selected"))
+							.ToolTipText(LOCTEXT("UseLastSeedTip", "Fill in the seed of the selected take."))
+							.IsEnabled_Lambda([this] { return !LastSeed.IsEmpty(); })
+							.OnClicked_Lambda([this] {
+								Seed->SetText(FText::FromString(LastSeed));
+								return FReply::Handled();
+							})
+						]
+						+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0, 0, 0)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("ClearSeed", "Clear"))
+							.IsEnabled_Lambda([this] { return !Seed->GetText().IsEmptyOrWhitespace(); })
+							.OnClicked_Lambda([this] {
+								Seed->SetText(FText::GetEmpty());
+								return FReply::Handled();
+							})
+						]
+					]
+					// 텍스트 인코더 방식. 프로젝트 설정(Kimodo Animation (Local))과 같은 값을 바로 바꾼다.
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+						[
+							SNew(SBox).MinDesiredWidth(90)[SNew(STextBlock).Text(LOCTEXT("TextEncoder", "Text encoder"))]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SComboButton)
+							.ToolTipText_Lambda([] { return GetEncoderOption(GetDefault<UKimodoUserSettings>()->TextEncoderDevice).Tip; })
+							.OnGetMenuContent_Lambda([this] { return MakeEncoderMenu(); })
+							.ButtonContent()
+							[
+								SNew(STextBlock).Text_Lambda([] {
+									return GetEncoderOption(GetDefault<UKimodoUserSettings>()->TextEncoderDevice).Label;
+								})
+							]
+						]
+					]
+				]
+			];
+	}
+
+	/** 3. 테이크: 생성할 때마다 한 줄씩 쌓인다. 골라서 비교하고, 고른 테이크로 수정·저장한다. */
+	TSharedRef<SWidget> MakeTakesArea()
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(SBox)
+				.MaxDesiredHeight(190.0f)
+				[
+					SAssignNew(TakesView, SListView<TSharedPtr<FKimodoTake>>)
+					.ListItemsSource(&Takes)
+					.SelectionMode(ESelectionMode::Single)
+					.OnGenerateRow(this, &SKimodoPanel::MakeTakeRow)
+					.OnSelectionChanged_Lambda([this](TSharedPtr<FKimodoTake> Item, ESelectInfo::Type Info)
+					{
+						// 코드에서 맞춘 선택(Direct)은 Python으로 다시 보내지 않는다.
+						if (Info == ESelectInfo::Direct || !Item.IsValid() || Item->Id == SelectedTakeId) return;
+						if (bBusy)
+						{
+							SyncTakeSelection();
+							return;
+						}
+						RunAction(TEXT("select"), Item->Id);
+					})
+				]
+			]
+			// 고른 테이크의 해석과 실제 Kimodo 프롬프트. 드래그로 선택해 Ctrl+C로 복사할 수 있다.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(SExpandableArea)
+				.AreaTitle(LOCTEXT("InputPrompt", "Input prompt"))
+				.InitiallyCollapsed(true)
+				.Padding(FMargin(0, 4, 0, 0))
+				.Visibility_Lambda([this] { return Interpretation.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				.BodyContent()
+				[
+					SNew(SMultiLineEditableTextBox)
+					.IsReadOnly(true)
+					.AutoWrapText(true)
+					.AlwaysShowScrollbars(false)
+					.ToolTipText(LOCTEXT("InterpretationCopyTip", "Drag to select, Ctrl+C to copy."))
+					.Text_Lambda([this] { return Interpretation; })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				.Visibility_Lambda([this] { return bCanRevise ? EVisibility::Visible : EVisibility::Collapsed; })
+				.IsEnabled_Lambda([this] { return !bBusy; })
+				+ SHorizontalBox::Slot().FillWidth(1)
+				[
+					SAssignNew(Revision, SEditableTextBox)
+					.HintText(LOCTEXT("RevisionHint", "Revise the selected take, e.g. Land in a deeper crouch"))
+					.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& Event)
+					{
+						if (Event.GetKey() == EKeys::Tab && Revision->GetText().IsEmptyOrWhitespace())
+						{
+							Revision->SetText(LOCTEXT("RevisionExample", "Land in a deeper crouch"));
+							return FReply::Handled();
+						}
+						if (Event.GetKey() == EKeys::Enter && CanRevise())
+						{
+							RunAction(TEXT("revise"), Revision->GetText().ToString(), Duration->GetText().ToString());
+							return FReply::Handled();
+						}
+						return FReply::Unhandled();
+					})
+				]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("Revise", "Revise"))
+					.ToolTipText(LOCTEXT("ReviseTip", "Regenerate from the selected take with this change (Enter). The result is added as a new take."))
+					.IsEnabled_Lambda([this] { return CanRevise(); })
+					.OnClicked_Lambda([this] {
+						return RunAction(TEXT("revise"), Revision->GetText().ToString(), Duration->GetText().ToString());
+					})
+				]
+			];
+	}
+
+	TSharedRef<ITableRow> MakeTakeRow(TSharedPtr<FKimodoTake> Item, const TSharedRef<STableViewBase>& Owner)
+	{
+		const FString Id = Item->Id;
+		return SNew(STableRow<TSharedPtr<FKimodoTake>>, Owner)
+			.Padding(FMargin(2, 3))
+			[
+				SNew(SHorizontalBox)
+				// 별표: 표시한 테이크는 테이크가 많아져도 자동으로 지워지지 않는다.
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+				[
+					SNew(SButton)
+					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+					.ContentPadding(FMargin(2))
+					.ToolTipText(LOCTEXT("StarTip", "Star to keep this take. Unstarred takes beyond 8 are removed, oldest first."))
+					.OnClicked_Lambda([this, Id] { return RunAction(TEXT("star"), Id); })
+					[
+						SNew(SImage)
+						.Image(FAppStyle::GetBrush(Item->bStarred ? "Icons.Star" : "Icons.Star.Outline"))
+						.ColorAndOpacity(Item->bStarred ? FSlateColor(FLinearColor(1.0f, 0.75f, 0.1f)) : FSlateColor::UseSubduedForeground())
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(FString::Printf(TEXT("#%d"), Item->Number)))
+					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
+				]
+				+ SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(Item->Prompt))
+					.ToolTipText(FText::FromString(Item->Prompt))
+					.OverflowPolicy(ETextOverflowPolicy::Ellipsis)
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8, 0, 0, 0)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(FString::Printf(TEXT("seed %s · %.2fs"), *Item->Seed, Item->Duration)))
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				]
+				// 저장한 테이크는 체크 표시와 저장 경로 툴팁
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8, 0, 0, 0)
+				[
+					SNew(SImage)
+					.Image(FAppStyle::GetBrush("Icons.Check"))
+					.ColorAndOpacity(FSlateColor(FLinearColor(0.3f, 0.8f, 0.4f)))
+					.ToolTipText(FText::Format(LOCTEXT("SavedTip", "Saved as {0}"), FText::FromString(Item->Saved)))
+					.Visibility(Item->Saved.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible)
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4, 0, 0, 0)
+				[
+					SNew(SButton)
+					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+					.ContentPadding(FMargin(2))
+					.ToolTipText(LOCTEXT("DiscardTip", "Remove this take (its temporary preview assets are deleted; saved assets stay)."))
+					.IsEnabled_Lambda([this] { return !bBusy; })
+					.OnClicked_Lambda([this, Id] { return RunAction(TEXT("discard"), Id); })
+					[
+						SNew(SImage)
+						.Image(FAppStyle::GetBrush("Icons.X"))
+						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					]
+				]
+			];
+	}
+
+	/** 4. 저장: 이름은 고른 테이크에 맞춰 자동으로 제안하고, 폴더는 마지막으로 저장한 곳을 기억한다. */
+	TSharedRef<SWidget> MakeSaveArea()
+	{
+		const UKimodoUserSettings* UserSettings = GetDefault<UKimodoUserSettings>();
+		return SNew(SVerticalBox)
+			.IsEnabled_Lambda([this] { return !bBusy; })
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+				[
+					SNew(SBox).MinDesiredWidth(60)[SNew(STextBlock).Text(LOCTEXT("Name", "Name"))]
+				]
+				+ SHorizontalBox::Slot().FillWidth(1)
+				[
+					SAssignNew(AssetName, SEditableTextBox)
+					.ToolTipText(LOCTEXT("NameTip", "Suggested from the selected take's prompt and seed. Edit it to use your own name."))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+				[
+					SNew(SBox).MinDesiredWidth(60)[SNew(STextBlock).Text(LOCTEXT("SaveFolder", "Folder"))]
+				]
+				+ SHorizontalBox::Slot().FillWidth(1)
+				[
+					SAssignNew(SaveFolder, SEditableTextBox)
+					.Text(FText::FromString(UserSettings->LastSaveFolder))
+					.HintText_Lambda([] {
+						return FText::Format(LOCTEXT("SaveFolderHint", "Default: {0}"), FText::FromString(GetOutputFolder()));
+					})
+					.ToolTipText(LOCTEXT("SaveFolderTip", "Content folder for the saved AnimSequence, such as /Game/Animations. Leave empty to use the project default. The last folder you saved to is remembered."))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(6, 0, 0, 0)
+				[
+					SAssignNew(FolderPicker, SComboButton)
+					.ToolTipText(LOCTEXT("BrowseFolderTip", "Pick a folder from the Content Browser."))
+					.OnGetMenuContent_Lambda([this] { return MakeFolderPicker(); })
+					.ButtonContent()
+					[
+						SNew(STextBlock).Text(LOCTEXT("BrowseFolder", "Browse..."))
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0, 0, 0)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("DefaultFolder", "Default"))
+					.ToolTipText(LOCTEXT("DefaultFolderTip", "Clear the folder to save to the project default."))
+					.IsEnabled_Lambda([this] { return !SaveFolder->GetText().IsEmptyOrWhitespace(); })
+					.OnClicked_Lambda([this] {
+						SaveFolder->SetText(FText::GetEmpty());
+						return FReply::Handled();
+					})
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("Save", "Save selected take"))
+				.IsEnabled_Lambda([this] { return bHasPreview && !AssetName->GetText().IsEmptyOrWhitespace(); })
+				.OnClicked_Lambda([this] { return RunAction(TEXT("save"), AssetName->GetText().ToString()); })
+			];
+	}
+
+	/** 항상 보이는 실행 바: 상태, 진행 막대, Restore / Cancel / Generate. */
+	TSharedRef<SWidget> MakeActionBar()
+	{
+		return SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(FMargin(16, 8))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(0, 1, 8, 0)
+					[
+						SNew(SCircularThrobber)
+						.Radius(7.0f)
+						.Visibility_Lambda([this] { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
+					]
+					+ SHorizontalBox::Slot().FillWidth(1)
+					[
+						SNew(STextBlock)
+						.AutoWrapText(true)
+						.Text_Lambda([this] {
+							if (bBusy && !StageText.IsEmpty())
+							{
+								return Progress >= 0.0f
+									? FText::Format(LOCTEXT("StageProgress", "{0} {1}%  ·  {2}"), FText::FromString(StageText),
+										FText::AsNumber(FMath::RoundToInt(Progress * 100.0f)), Status)
+									: FText::Format(LOCTEXT("StageOnly", "{0}  ·  {1}"), FText::FromString(StageText), Status);
+							}
+							return Status;
+						})
+						.ToolTipText_Lambda([this] { return FText::FromString(Detail); })
+					]
+				]
+				// 단계 진행률을 모르면(로딩·해석·변환) 왕복하는 막대로 보여 준다.
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+				[
+					SNew(SProgressBar)
+					.Visibility_Lambda([this] { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
+					.Percent_Lambda([this] { return Progress >= 0.0f ? TOptional<float>(Progress) : TOptional<float>(); })
+					.ToolTipText_Lambda([this] { return FText::FromString(Detail); })
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					// 에디터 시작을 막지 않도록 직전 미리보기(glTF 다시 가져오기)는 눌렀을 때만 복원한다.
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("Restore", "Restore last preview"))
+						.ToolTipText(LOCTEXT("RestoreTip", "Re-import and retarget the preview from the previous session."))
+						.Visibility_Lambda([this] { return bCanRestore && !bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
+						.OnClicked_Lambda([this] { return RunAction(TEXT("restore")); })
+					]
+					+ SHorizontalBox::Slot().FillWidth(1)
+					[
+						SNullWidget::NullWidget
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 8, 0)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("Cancel", "Cancel"))
+						.ToolTipText(LOCTEXT("CancelTip", "Stop the running generation and keep the takes you have."))
+						.Visibility_Lambda([this] { return bBusy && IsReady() ? EVisibility::Visible : EVisibility::Collapsed; })
+						.OnClicked_Lambda([this] { return RunAction(TEXT("cancel")); })
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(SButton)
+						.ButtonStyle(FAppStyle::Get(), "PrimaryButton")
+						.ContentPadding(FMargin(16, 4))
+						.ToolTipText_Lambda([this] { return GenerateBlockedReason(); })
+						.IsEnabled_Lambda([this] { return CanGenerate(); })
+						.OnClicked_Lambda([this] {
+							return RunAction(TEXT("generate"), Prompt->GetText().ToString(), Duration->GetText().ToString());
+						})
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("Generate", "Generate  (Ctrl+Enter)"))
+							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
+						]
+					]
+				]
+			];
+	}
+
+	// ---------------------------------------------------------------- helpers
+
 	bool IsReady() const { return SetupState == TEXT("ready"); }
+
+	bool CanGenerate() const
+	{
+		return GenerateBlockedReason().IsEmpty();
+	}
+
+	/** Generate가 꺼져 있는 이유. 버튼 툴팁으로 보여 준다(비어 있으면 생성 가능). */
+	FText GenerateBlockedReason() const
+	{
+		if (bNeedsInitialState) return LOCTEXT("BlockedStarting", "Waiting for Unreal Python…");
+		if (bBusy) return LOCTEXT("BlockedBusy", "A generation is already running.");
+		if (!IsReady()) return LOCTEXT("BlockedSetup", "Install Kimodo first.");
+		if (TargetMeshPath.IsEmpty()) return LOCTEXT("BlockedMesh", "Choose a target mesh under Target.");
+		if (!Prompt.IsValid() || Prompt->GetText().ToString().TrimStartAndEnd().IsEmpty()) return LOCTEXT("BlockedPrompt", "Enter a motion prompt under Prompt.");
+		return FText::GetEmpty();
+	}
+
+	bool CanRevise() const
+	{
+		return !bBusy && bCanRevise && IsReady() && !TargetMeshPath.IsEmpty() && Revision.IsValid() && !Revision->GetText().IsEmptyOrWhitespace();
+	}
+
+	/** 라벨 + 썸네일이 있는 에셋 선택 칸. bClearsDependents면 바뀔 때 IK Rig·Retargeter를 비운다. */
+	TSharedRef<SWidget> MakeAssetPicker(const FText& Label, const FText& Tip, const UClass* Class, FString* Path, bool bClearsDependents)
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 4)
+			[
+				SNew(STextBlock).Text(Label).ToolTipText(Tip)
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SObjectPropertyEntryBox)
+				.AllowedClass(Class)
+				.ObjectPath_Lambda([Path] { return *Path; })
+				.OnObjectChanged_Lambda([this, Path, bClearsDependents](const FAssetData& Asset)
+				{
+					// 다른 메시의 IK Rig와 Retargeter가 남지 않도록 함께 비운다.
+					const FString NewPath = ToAssetPath(Asset);
+					if (NewPath == *Path) return;
+
+					*Path = NewPath;
+					if (bClearsDependents)
+					{
+						TargetRigPath.Reset();
+						RetargeterPath.Reset();
+					}
+					RememberTargets();
+				})
+				.ThumbnailPool(UThumbnailManager::Get().GetSharedThumbnailPool())
+				.DisplayThumbnail(true)
+				.ThumbnailSizeOverride(FIntPoint(48, 48))
+				.DisplayCompactSize(true)
+			];
+	}
+
+	void RememberTargets() const
+	{
+		UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+		UserSettings->LastTargetMesh = TargetMeshPath;
+		UserSettings->LastTargetIKRig = TargetRigPath;
+		UserSettings->LastRetargeter = RetargeterPath;
+		UserSettings->SaveConfig();
+	}
+
+	/** 텍스트 인코더 방식 메뉴. 고르면 사용자별 설정(EditorPerProjectUserSettings)에 바로 저장한다. */
+	TSharedRef<SWidget> MakeEncoderMenu()
+	{
+		FMenuBuilder Menu(true, nullptr);
+		for (const FEncoderOption& Option : GetEncoderOptions())
+		{
+			const EKimodoTextEncoderDevice Value = Option.Value;
+			Menu.AddMenuEntry(Option.Label, Option.Tip, FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateLambda([Value] {
+						UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+						UserSettings->TextEncoderDevice = Value;
+						UserSettings->SaveConfig();
+					}),
+					FCanExecuteAction(),
+					FIsActionChecked::CreateLambda([Value] {
+						return GetDefault<UKimodoUserSettings>()->TextEncoderDevice == Value;
+					})),
+				NAME_None, EUserInterfaceActionType::RadioButton);
+		}
+		return Menu.MakeWidget();
+	}
+
+	/** Content Browser 폴더 트리. 고르면 저장 폴더 칸에 넣고 닫는다. */
+	TSharedRef<SWidget> MakeFolderPicker()
+	{
+		const FString Current = SaveFolder->GetText().ToString().TrimStartAndEnd();
+
+		FPathPickerConfig Config;
+		Config.DefaultPath = Current.IsEmpty() ? GetOutputFolder() : Current;
+		Config.bAddDefaultPath = true;
+		Config.bAllowClassesFolder = false;
+		Config.bAllowReadOnlyFolders = false;
+		Config.OnPathSelected = FOnPathSelected::CreateLambda([this](const FString& Path)
+		{
+			SaveFolder->SetText(FText::FromString(Path));
+			FolderPicker->SetIsOpen(false);
+		});
+
+		FContentBrowserModule& ContentBrowser = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+		return SNew(SBox)
+			.WidthOverride(320.0f)
+			.HeightOverride(400.0f)
+			[
+				ContentBrowser.Get().CreatePathPicker(Config)
+			];
+	}
 
 	/** 설치 안내에 보여 줄 Python 폴더. 환경변수나 설정이 있으면 그 경로를 쓴다. */
 	FString GetInstallLocationText() const
@@ -539,6 +1019,7 @@ private:
 		Payload->SetStringField(TEXT("target_rig"), TargetRigPath);
 		Payload->SetStringField(TEXT("retargeter"), RetargeterPath);
 		Payload->SetStringField(TEXT("output_folder"), GetOutputFolder());
+		Payload->SetStringField(TEXT("save_folder"), SaveFolder.IsValid() ? SaveFolder->GetText().ToString().TrimStartAndEnd() : FString());
 		Payload->SetStringField(TEXT("model"), Settings->ModelName);
 		Payload->SetArrayField(TEXT("align_bones"), ToJsonArray(AlignBones));
 		Payload->SetStringField(TEXT("python"), ResolveLocalPath(TEXT("KIMODO_PYTHON"), TEXT("ECLIPSE_KIMODO_PYTHON"), UserSettings->PythonExecutable.FilePath, GetManagedPython()));
@@ -549,13 +1030,17 @@ private:
 		Payload->SetStringField(TEXT("text_encoder_device"),
 			UserSettings->TextEncoderDevice == EKimodoTextEncoderDevice::CUDA ? TEXT("cuda")
 			: UserSettings->TextEncoderDevice == EKimodoTextEncoderDevice::Auto ? TEXT("auto")
-			: TEXT("cpu"));
+			: UserSettings->TextEncoderDevice == EKimodoTextEncoderDevice::CPU ? TEXT("cpu")
+			: UserSettings->TextEncoderDevice == EKimodoTextEncoderDevice::LowMemoryExact ? TEXT("stream-exact")
+			: TEXT("stream"));
 
 		FString Json;
 		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Json);
 		FJsonSerializer::Serialize(Payload, Writer);
 		return Json;
 	}
+
+	// ---------------------------------------------------------------- python bridge
 
 	FReply RunAction(const TCHAR* Action, const FString& Value = FString(), const FString& DurationValue = FString(), bool bAllowAutoPlay = true)
 	{
@@ -590,7 +1075,7 @@ private:
 			TEXT("    kimodo_animation_panel = runpy.run_path(base64.b64decode('%s').decode('utf-8'))\n"),
 			*EncodedScript);
 
-		// 2) 요청을 처리하고 상태 한 줄(Base64)을 평가 결과로 받는다. print를 쓰지 않아 Output Log에 쌓이지 않는다.
+		// 2) 요청을 처리하고 상태(JSON, Base64)를 평가 결과로 받는다. print를 쓰지 않아 Output Log에 쌓이지 않는다.
 		FPythonCommandEx Command;
 		Command.ExecutionMode = EPythonCommandExecutionMode::EvaluateStatement;
 		Command.FileExecutionScope = EPythonFileExecutionScope::Public;
@@ -602,92 +1087,205 @@ private:
 		const bool bWasPlaying = Preview->IsPlaying();
 		if (bSaving)
 		{
-			// 저장 후 Python이 임시 에셋을 정리하기 전에 컴포넌트 참조를 해제한다.
+			// 저장 중 Python이 임시 에셋을 정리할 수 있으므로 컴포넌트 참조를 잠시 해제한다.
 			Preview->SetClip(nullptr);
 		}
+
+		// 리타게팅(IKRetargetBatchOperation)은 끝날 때 Content Browser를 새 에셋으로 옮긴다(SyncBrowserToAssets).
+		// Content Browser가 있는 레벨 에디터 탭과 같은 탭 묶음에 패널을 두면 그 탭이 앞으로 와서 패널이 가려지므로,
+		// 호출 전에 앞에 있던 패널 탭이 뒤로 밀렸으면 다시 앞으로 가져온다.
+		const TSharedPtr<SDockTab> OwnTab = FGlobalTabmanager::Get()->FindExistingLiveTab(FTabId(KimodoTabName));
+		const bool bWasForeground = OwnTab.IsValid() && OwnTab->IsForeground();
+
 		FString Line;
-		if (Python->ExecPythonCommandEx(Load) && Python->ExecPythonCommandEx(Command) && DecodeStatusLine(Command.CommandResult, Line))
+		TSharedPtr<FJsonObject> State;
+		const bool bRan = Python->ExecPythonCommandEx(Load) && Python->ExecPythonCommandEx(Command) && DecodeStatusLine(Command.CommandResult, Line);
+		if (bWasForeground && OwnTab.IsValid() && !OwnTab->IsForeground())
 		{
+			OwnTab->ActivateInParent(ETabActivationCause::SetDirectly);
+		}
+		if (!bRan)
+		{
+			bBusy = false;
+			Status = LOCTEXT("PythonError", "Kimodo could not run. See the Unreal Output Log.");
+			return FReply::Handled();
+		}
+		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Line), State) || !State.IsValid())
+		{
+			bBusy = false;
+			Status = LOCTEXT("PythonMismatch", "The Kimodo panel script and plugin do not match. Restart the editor.");
+			return FReply::Handled();
+		}
+
+		ApplyState(*State, bSaving, PreviousTime, bWasPlaying, bAllowAutoPlay);
+		return FReply::Handled();
+	}
+
+	void ApplyState(const FJsonObject& State, bool bSaving, float PreviousTime, bool bWasPlaying, bool bAllowAutoPlay)
+	{
+		bBusy = State.GetBoolField(TEXT("busy"));
+		bHasPreview = State.GetBoolField(TEXT("has_preview"));
+		bCanRevise = State.GetBoolField(TEXT("can_revise"));
+		bCanRestore = State.GetBoolField(TEXT("restorable"));
+		LastSeed = State.GetStringField(TEXT("seed"));
+		StageText = State.GetStringField(TEXT("stage"));
+		Progress = static_cast<float>(State.GetNumberField(TEXT("progress")));
+		Detail = State.GetStringField(TEXT("detail"));
+		Status = FText::FromString(State.GetStringField(TEXT("message")));
+
+		// 설치 상태: installing, ready, missing:<빠진 항목>
+		const FString SetupField = State.GetStringField(TEXT("setup"));
+		SetupState = SetupField;
+		SetupMissing.Reset();
+		FString StateName;
+		FString MissingItem;
+		if (SetupField.Split(TEXT(":"), &StateName, &MissingItem))
+		{
+			SetupState = StateName;
+			SetupMissing = MissingItem;
+		}
+
+		// 고른 테이크의 해석과 Kimodo에 실제로 전달한 영어 프롬프트
+		const FString Description = State.GetStringField(TEXT("interpretation")).TrimStartAndEnd();
+		const FString EnglishPrompt = State.GetStringField(TEXT("english")).TrimStartAndEnd();
+		Interpretation = FText::GetEmpty();
+		if (!Description.IsEmpty() && !EnglishPrompt.IsEmpty())
+		{
+			Interpretation = FText::Format(LOCTEXT("InterpretationWithPrompt", "Interpretation · {0}\nKimodo prompt · {1}"),
+				FText::FromString(Description), FText::FromString(EnglishPrompt));
+		}
+		else if (!Description.IsEmpty())
+		{
+			Interpretation = FText::Format(LOCTEXT("Interpretation", "Interpretation · {0}"), FText::FromString(Description));
+		}
+		else if (!EnglishPrompt.IsEmpty())
+		{
+			Interpretation = FText::Format(LOCTEXT("PromptOnly", "Kimodo prompt · {0}"), FText::FromString(EnglishPrompt));
+		}
+
+		UpdateTakes(State);
+
+		// 미리보기: 고른 테이크가 바뀌었거나 저장 직후면 클립을 다시 연결한다.
+		const FString ClipPath = State.GetStringField(TEXT("path"));
+		if (bSaving || ClipPath != PreviewPath)
+		{
+			PreviewPath = ClipPath;
+			UAnimSequence* Clip = nullptr;
+			if (!ClipPath.IsEmpty())
 			{
-				TArray<FString> Fields;
-				Line.ParseIntoArray(Fields, TEXT("|"), false);
-				if (Fields.Num() != 10)
-				{
-					bBusy = false;
-					Status = LOCTEXT("PythonMismatch", "The Kimodo panel script and plugin do not match. Restart the editor.");
-					return FReply::Handled();
-				}
+				const FSoftObjectPath ObjectPath(ClipPath);
+				Clip = Cast<UAnimSequence>(ObjectPath.ResolveObject());
+				if (!Clip) Clip = Cast<UAnimSequence>(ObjectPath.TryLoad());
+			}
+			const bool bAutoPlay = bSaving ? bWasPlaying : bAllowAutoPlay;
+			Preview->SetClip(Clip, bSaving ? PreviousTime : 0.0f, bAutoPlay);
+		}
 
-				bBusy = Fields[0] == TEXT("1");
-				bHasPreview = Fields[1] == TEXT("1");
-				bCanRevise = Fields[4] == TEXT("1");
-				bCanRestore = Fields[8] == TEXT("1");
-				LastSeed = Fields[9].TrimStartAndEnd();
+		// 저장 이름 제안: 사용자가 직접 고친 이름은 덮어쓰지 않는다.
+		const FString Suggested = State.GetStringField(TEXT("suggested_name"));
+		if (AssetName.IsValid() && !Suggested.IsEmpty() && Suggested != LastAutoName)
+		{
+			const FString Current = AssetName->GetText().ToString().TrimStartAndEnd();
+			if (Current.IsEmpty() || Current == LastAutoName || Current == GetDefault<UKimodoSettings>()->DefaultAssetName)
+			{
+				AssetName->SetText(FText::FromString(Suggested));
+			}
+			LastAutoName = Suggested;
+		}
 
-				// 설치 상태: installing, ready, missing:<빠진 항목>
-				const FString SetupField = Fields[7].TrimStartAndEnd();
-				SetupState = SetupField;
-				SetupMissing.Reset();
-				FString StateName;
-				FString MissingItem;
-				if (SetupField.Split(TEXT(":"), &StateName, &MissingItem))
-				{
-					SetupState = StateName;
-					SetupMissing = MissingItem;
-				}
+		// 저장에 성공하면 그 폴더를 기억한다.
+		if (bSaving && Status.ToString().StartsWith(TEXT("Saved ")))
+		{
+			UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+			UserSettings->LastSaveFolder = SaveFolder->GetText().ToString().TrimStartAndEnd();
+			UserSettings->SaveConfig();
+		}
 
-				// 한국어 해석과 Kimodo에 실제로 전달한 영어 프롬프트를 함께 보여 준다.
-				const FString Description = Fields[5].TrimStartAndEnd();
-				const FString EnglishPrompt = Fields[6].TrimStartAndEnd();
-				Interpretation = FText::GetEmpty();
-				if (!Description.IsEmpty() && !EnglishPrompt.IsEmpty())
+		// 생성이 끝나면 다른 창을 보고 있어도 알 수 있게 에디터 알림을 띄운다.
+		const FString Event = State.GetStringField(TEXT("event"));
+		if (!Event.IsEmpty())
+		{
+			Notify(Event == TEXT("ready"));
+		}
+
+		if (!bBusy && bHasPreview)
+		{
+			// 패널에서 저장하기 전에는 Save All에 임시 에셋을 포함하지 않는다.
+			const FString PreviewPrefix = GetOutputFolder() / TEXT("_Preview_");
+			for (TObjectIterator<UPackage> Package; Package; ++Package)
+			{
+				if (Package->IsDirty() && Package->GetName().StartsWith(PreviewPrefix))
 				{
-					Interpretation = FText::Format(LOCTEXT("InterpretationWithPrompt", "동작 해석 · {0}\nKimodo 프롬프트 · {1}"),
-						FText::FromString(Description), FText::FromString(EnglishPrompt));
+					Package->SetDirtyFlag(false);
 				}
-				else if (!Description.IsEmpty())
-				{
-					Interpretation = FText::Format(LOCTEXT("Interpretation", "동작 해석 · {0}"), FText::FromString(Description));
-				}
-				else if (!EnglishPrompt.IsEmpty())
-				{
-					// 해석 없이 직접 입력한 프롬프트(수정 요청은 이어 붙인 결과)를 보여 준다.
-					Interpretation = FText::Format(LOCTEXT("PromptOnly", "Kimodo 프롬프트 · {0}"), FText::FromString(EnglishPrompt));
-				}
-				const FString ClipPath = bBusy ? FString() : Fields[3].TrimStartAndEnd();
-				if (bSaving || ClipPath != PreviewPath)
-				{
-					PreviewPath = ClipPath;
-					UAnimSequence* Clip = nullptr;
-					if (!ClipPath.IsEmpty())
-					{
-						const FSoftObjectPath ObjectPath(ClipPath);
-						Clip = Cast<UAnimSequence>(ObjectPath.ResolveObject());
-						if (!Clip) Clip = Cast<UAnimSequence>(ObjectPath.TryLoad());
-					}
-					const bool bAutoPlay = bSaving ? bWasPlaying : bAllowAutoPlay;
-					Preview->SetClip(Clip, bSaving ? PreviousTime : 0.0f, bAutoPlay);
-				}
-				if (!bBusy && bHasPreview)
-				{
-					// 패널에서 저장하기 전에는 Save All에 임시 에셋을 포함하지 않는다.
-					const FString PreviewPrefix = GetOutputFolder() / TEXT("_Preview_");
-					for (TObjectIterator<UPackage> Package; Package; ++Package)
-					{
-						if (Package->IsDirty() && Package->GetName().StartsWith(PreviewPrefix))
-						{
-							Package->SetDirtyFlag(false);
-						}
-					}
-				}
-				Status = FText::FromString(Fields[2]);
-				return FReply::Handled();
+			}
+		}
+	}
+
+	/** Python의 takes 목록이 바뀌었을 때만 리스트를 다시 만든다. */
+	void UpdateTakes(const FJsonObject& State)
+	{
+		SelectedTakeId = State.GetStringField(TEXT("selected"));
+
+		TArray<TSharedPtr<FKimodoTake>> NewTakes;
+		FString Signature;
+		const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+		if (State.TryGetArrayField(TEXT("takes"), Items))
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Items)
+			{
+				const TSharedPtr<FJsonObject> Object = Value->AsObject();
+				if (!Object.IsValid()) continue;
+				TSharedPtr<FKimodoTake> Take = MakeShared<FKimodoTake>();
+				Take->Id = Object->GetStringField(TEXT("id"));
+				Take->Number = static_cast<int32>(Object->GetNumberField(TEXT("number")));
+				Take->Prompt = Object->GetStringField(TEXT("prompt"));
+				Take->Seed = Object->GetStringField(TEXT("seed"));
+				Take->Duration = Object->GetNumberField(TEXT("duration"));
+				Take->bStarred = Object->GetBoolField(TEXT("starred"));
+				Take->Saved = Object->GetStringField(TEXT("saved"));
+				Take->Target = Object->GetStringField(TEXT("target"));
+				Signature += FString::Printf(TEXT("%s:%d:%s;"), *Take->Id, Take->bStarred ? 1 : 0, *Take->Saved);
+				NewTakes.Add(Take);
 			}
 		}
 
-		bBusy = false;
-		Status = LOCTEXT("PythonError", "Kimodo could not run. See the Unreal Output Log.");
-		return FReply::Handled();
+		if (Signature != TakesSignature)
+		{
+			TakesSignature = Signature;
+			Takes = MoveTemp(NewTakes);
+			if (TakesView.IsValid()) TakesView->RequestListRefresh();
+		}
+		SyncTakeSelection();
+	}
+
+	void SyncTakeSelection()
+	{
+		if (!TakesView.IsValid()) return;
+		const TSharedPtr<FKimodoTake>* Found = Takes.FindByPredicate([this](const TSharedPtr<FKimodoTake>& Take) { return Take->Id == SelectedTakeId; });
+		if (Found)
+		{
+			if (!TakesView->IsItemSelected(*Found)) TakesView->SetSelection(*Found, ESelectInfo::Direct);
+		}
+		else
+		{
+			TakesView->ClearSelection();
+		}
+	}
+
+	void Notify(bool bSucceeded) const
+	{
+		FNotificationInfo Info(bSucceeded ? LOCTEXT("NotifyReady", "Kimodo take ready") : LOCTEXT("NotifyFailed", "Kimodo generation failed"));
+		Info.SubText = Status;
+		Info.ExpireDuration = bSucceeded ? 5.0f : 8.0f;
+		Info.bUseSuccessFailIcons = true;
+		// 기본값(메인 에디터 창)에 붙이면 패널이 떠 있는 창 대신 메인 창이 앞으로 올라온다.
+		// 패널이 있는 창에 붙여 알림만 띄우고 창 순서는 그대로 둔다.
+		Info.ForWindow = FSlateApplication::Get().FindWidgetWindow(AsShared());
+		if (const TSharedPtr<SNotificationItem> Item = FSlateNotificationManager::Get().AddNotification(Info))
+		{
+			Item->SetCompletionState(bSucceeded ? SNotificationItem::CS_Success : SNotificationItem::CS_Fail);
+		}
 	}
 
 	/** EvaluateStatement 결과는 Python repr('...')이므로 따옴표를 벗기고 Base64(UTF-8)를 푼다. */
@@ -727,17 +1325,27 @@ private:
 	TSharedPtr<SEditableTextBox> Seed;
 	TSharedPtr<SEditableTextBox> Revision;
 	TSharedPtr<SEditableTextBox> AssetName;
+	TSharedPtr<SEditableTextBox> SaveFolder;
+	TSharedPtr<SComboButton> FolderPicker;
 	TSharedPtr<SKimodoPreview> Preview;
 	TSharedPtr<SEditableTextBox> Token;
+	TSharedPtr<SListView<TSharedPtr<FKimodoTake>>> TakesView;
+	TArray<TSharedPtr<FKimodoTake>> Takes;
+	FString TakesSignature;
+	FString SelectedTakeId;
 	FString TargetMeshPath;
 	FString TargetRigPath;
 	FString RetargeterPath;
 	FString PreviewPath;
 	FString LastSeed;
+	FString LastAutoName;
 	FString SetupState;
 	FString SetupMissing;
+	FString StageText;
+	FString Detail;
 	FText Status;
 	FText Interpretation;
+	float Progress = -1.0f;
 	bool bNeedsInitialState = true;
 	bool bBusy = false;
 	bool bHasPreview = false;

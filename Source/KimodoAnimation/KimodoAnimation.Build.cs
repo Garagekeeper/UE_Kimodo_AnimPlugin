@@ -25,6 +25,7 @@ public class KimodoAnimation : ModuleRules
 				"SlateCore",
 				"ToolMenus",
 				"PropertyEditor",
+				"ContentBrowser",
 				"PythonScriptPlugin",
 				"AdvancedPreviewScene",
 				"AnimGraph",

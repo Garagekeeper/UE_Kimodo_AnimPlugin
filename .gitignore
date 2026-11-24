@@ -15,6 +15,9 @@ DerivedDataCache/
 *.lib
 *.dll
 
+# Blog drafts and benchmark evidence stay local (not published with the plugin)
+Docs/
+
 # Python bytecode cache
 __pycache__/
 *.pyc

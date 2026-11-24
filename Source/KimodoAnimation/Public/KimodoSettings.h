@@ -9,11 +9,15 @@ class UIKRetargeter;
 class UIKRigDefinition;
 class USkeletalMesh;
 
-/** Llama 3 8B 텍스트 인코더를 돌릴 장치 (Kimodo의 TEXT_ENCODER_DEVICE). */
+/** Llama 3 8B 텍스트 인코더를 돌리는 방식. 어느 방식이든 같은 프롬프트는 디스크 캐시를 쓴다. */
 UENUM()
 enum class EKimodoTextEncoderDevice : uint8
 {
-	/** 시스템 RAM 약 32 GB. 느리지만 어느 PC에서나 동작한다. */
+	/** 층을 하나씩 디스크에서 읽어 CPU로 계산한다. RAM 1~2 GB, 프롬프트당 약 15초(로딩 없음). 일반 PC 권장. */
+	LowMemory UMETA(DisplayName = "Low memory (streaming)"),
+	/** Low memory와 같은 메모리로, 원래 CPU 방식과 비트 단위로 같은 결과를 낸다. 인코딩이 조금 더 걸린다(측정 시 생성 1회 약 40초). */
+	LowMemoryExact UMETA(DisplayName = "Low memory (exact)"),
+	/** 모델 전체를 RAM에 올린다(약 16 GB). 로딩이 길다. */
 	CPU,
 	/** VRAM 16 GB 이상인 NVIDIA GPU. 부족하면 생성이 메모리 부족으로 실패한다. */
 	CUDA,
@@ -89,7 +93,21 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Interpretation")
 	TArray<FString> InterpretAgents;
 
-	/** Llama 3 8B 텍스트 인코더 장치. 기본 CPU(RAM 약 32 GB). GPU는 VRAM 16 GB 이상일 때만 고른다. */
+	/** Llama 3 8B 텍스트 인코더 방식. 기본 Low memory(RAM 1~2 GB). CPU는 RAM 16 GB 이상, CUDA는 VRAM 16 GB 이상일 때만 고른다. */
 	UPROPERTY(Config, EditAnywhere, Category = "Generation")
-	EKimodoTextEncoderDevice TextEncoderDevice = EKimodoTextEncoderDevice::CPU;
+	EKimodoTextEncoderDevice TextEncoderDevice = EKimodoTextEncoderDevice::LowMemory;
+
+	/** 패널에서 마지막으로 고른 값. 다음에 패널을 열 때 프로젝트 기본값보다 먼저 쓴다(설정 화면에는 표시하지 않음). */
+	UPROPERTY(Config)
+	FString LastTargetMesh;
+
+	UPROPERTY(Config)
+	FString LastTargetIKRig;
+
+	UPROPERTY(Config)
+	FString LastRetargeter;
+
+	/** 마지막으로 저장에 성공한 폴더. 비어 있으면 프로젝트 설정의 출력 폴더를 쓴다. */
+	UPROPERTY(Config)
+	FString LastSaveFolder;
 };

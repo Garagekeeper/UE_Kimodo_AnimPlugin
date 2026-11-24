@@ -29,7 +29,11 @@ public:
 	{
 		if (Event.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Unhandled();
 
-		if (const TSharedPtr<SKimodoPreview> Viewport = Preview.Pin()) Viewport->SyncFromViewportCamera();
+		if (const TSharedPtr<SKimodoPreview> Viewport = Preview.Pin())
+		{
+			Viewport->SyncFromViewportCamera();
+			Viewport->SetOrbiting(true);
+		}
 		return FReply::Handled().CaptureMouse(SharedThis(this)).PreventThrottling();
 	}
 
@@ -37,7 +41,13 @@ public:
 	{
 		if (!HasMouseCapture() || Event.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Unhandled();
 
+		if (const TSharedPtr<SKimodoPreview> Viewport = Preview.Pin()) Viewport->SetOrbiting(false);
 		return FReply::Handled().ReleaseMouseCapture();
+	}
+
+	void OnMouseCaptureLost(const FCaptureLostEvent& CaptureLostEvent) override
+	{
+		if (const TSharedPtr<SKimodoPreview> Viewport = Preview.Pin()) Viewport->SetOrbiting(false);
 	}
 
 	FReply OnMouseMove(const FGeometry& Geometry, const FPointerEvent& Event) override
@@ -178,9 +188,16 @@ void SKimodoPreview::Seek(float Seconds)
 	}
 }
 
+void SKimodoPreview::SetFollowEnabled(bool bEnabled)
+{
+	bFollow = bEnabled;
+	if (bFollow) FollowTarget();
+}
+
 void SKimodoPreview::FollowTarget()
 {
-	if (FollowBone.IsNone() || Length <= 0.0f || !Mesh->GetSkeletalMeshAsset()) return;
+	// 추적을 끄면 재생 중에도 카메라를 건드리지 않아 좌클릭 회전이 그대로 유지된다.
+	if (!bFollow || bOrbiting || FollowBone.IsNone() || Length <= 0.0f || !Mesh->GetSkeletalMeshAsset()) return;
 
 	const FVector Location = Mesh->GetBoneIndex(FollowBone) != INDEX_NONE
 		? Mesh->GetBoneLocation(FollowBone)

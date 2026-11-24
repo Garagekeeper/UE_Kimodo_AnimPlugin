@@ -17,12 +17,14 @@ import unreal as u
 
 SCRIPTS = Path(__file__).resolve().parent
 KEPT_JOBS = 20
+# 패널에 남겨 둘 테이크 수. 넘으면 별표 없는 가장 오래된 테이크의 임시 에셋부터 지운다.
+MAX_TAKES = 8
 AGENT_NAMES = ("codex", "claude", "gemini")
 ASSETS = u.get_editor_subsystem(u.EditorAssetSubsystem)
 retarget = runpy.run_path(str(SCRIPTS / "retarget.py"))["retarget"]
 direct_description = runpy.run_path(str(SCRIPTS / "interpret.py"))["direct_description"]
 HANGUL = re.compile(r"[ᄀ-ᇿ㄰-㆏가-힣]")
-TEXT_ENCODER_DEVICES = ("cpu", "cuda", "auto")
+TEXT_ENCODER_DEVICES = ("stream", "stream-exact", "cpu", "cuda", "auto")
 # 터미널 색상·커서 코드(ESC[...m 등)와 줄바꿈 외 제어 문자. Slate 글꼴에 글리프가 없어 매 프레임 경고가 난다.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
 CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
@@ -232,6 +234,63 @@ def last_log_line(path, limit=140):
     return ""
 
 
+def read_tail(path, size=8192):
+    try:
+        with open(path, "rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - size))
+            return log.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+TQDM_STEPS = re.compile(r"(\d+)/(\d+) \[")
+
+
+def kimodo_progress(path):
+    """Kimodo 단계 로그에서 (세부 단계 이름, 진행률 0~1 또는 -1)을 읽는다.
+
+    kimodo_generate.py는 모델을 불러온 뒤 텍스트 인코더를 처음 쓸 때 'Text encoder:'를,
+    인코딩이 끝나면 'Encoded prompt' 또는 'cached embedding'을 찍고, 그다음 확산 샘플링이 tqdm으로 진행된다."""
+    try:
+        with open(path, "rb") as log:
+            text = log.read().decode("utf-8", errors="replace")
+    except OSError:
+        return "Loading Kimodo", -1.0
+    steps = TQDM_STEPS.findall(text[-8192:])
+    if "Encoded prompt" in text or "cached embedding" in text:
+        if steps:
+            done, total = (int(v) for v in steps[-1])
+            return "Generating motion", (done / total if total else -1.0)
+        return "Generating motion", 0.0
+    if "Text encoder:" in text:
+        return "Encoding prompt", -1.0
+    return "Loading Kimodo", -1.0
+
+
+NAME_STOP_WORDS = {
+    "a", "an", "the", "person", "someone", "and", "then", "with", "while", "of", "to", "in", "on", "at",
+    "his", "her", "their", "both", "one", "two", "it", "is", "slowly", "quickly",
+}
+
+
+def suggest_name(take, folder):
+    """AS_Kimodo_<핵심 단어 3개>_s<시드>. 같은 이름이 있으면 _2, _3을 붙인다."""
+    words = [w for w in re.findall(r"[A-Za-z]+", take.get("english") or take.get("prompt") or "")
+             if w.lower() not in NAME_STOP_WORDS]
+    core = "".join(w.capitalize() for w in words[:3]) or "Motion"
+    base = f"AS_Kimodo_{core}_s{take.get('seed')}"
+    name, index = base, 2
+    while folder and ASSETS.does_asset_exist(f"{folder}/{name}"):
+        name, index = f"{base}_{index}", index + 1
+    return name
+
+
+def save_folder_of(config):
+    folder = (config.get("save_folder") or "").strip().rstrip("/") or config.get("output_folder") or "/Game/Kimodo"
+    return folder if re.fullmatch(r"(/[\w\-]+)+", folder) else ""
+
+
 def folder_size_gb(path):
     total = 0
     for root, _, files in os.walk(path):
@@ -262,6 +321,73 @@ class Panel:
         self.restored = False
         # 다시 가져와야 하는 직전 미리보기(glTF). 에디터 시작을 막지 않도록 버튼을 눌렀을 때만 복원한다.
         self.restorable = None
+        # 생성 결과(테이크) 목록. 새로 생성해도 이전 결과를 지우지 않고 쌓아 두고, 고른 테이크로 수정·저장한다.
+        self.takes = []
+        self.selected = None
+        self.take_counter = 0
+
+    # -- takes -----------------------------------------------------------------
+    def find_take(self, take_id):
+        return next((t for t in self.takes if t["id"] == take_id), None)
+
+    def selected_take(self):
+        return self.find_take(self.selected) if self.selected else None
+
+    def apply_selected(self):
+        """선택한 테이크의 정보를 패널 상태(미리보기, 수정 기준 동작, 시드, 해석)로 옮긴다."""
+        take = self.selected_take()
+        self.preview = take["clip"] if take else None
+        self.preview_dir = take["dir"] if take else None
+        self.previous_motion = take["motion"] if take else ""
+        self.seed = take["seed"] if take else None
+        self.interpretation = take["interpretation"] if take else ""
+        self.english_prompt = take["english"] if take else ""
+
+    def add_take(self, clip, directory, **info):
+        self.take_counter += 1
+        take = {
+            "id": uuid4().hex[:12], "number": self.take_counter, "clip": clip, "dir": directory,
+            "prompt": "", "english": "", "interpretation": "", "motion": "", "seed": None,
+            "duration": clip.get_play_length(), "starred": False, "saved": "", "target": "",
+        }
+        take.update(info)
+        self.takes.append(take)
+        self.selected = take["id"]
+        self.apply_selected()
+        self.prune_takes()
+        return take
+
+    def prune_takes(self):
+        while len(self.takes) > MAX_TAKES:
+            victim = next((t for t in self.takes if not t["starred"] and t["id"] != self.selected), None)
+            if victim is None:
+                return
+            self.remove_take(victim["id"])
+
+    def remove_take(self, take_id):
+        take = self.find_take(take_id)
+        if take is None:
+            return
+        self.takes.remove(take)
+        # C++ 미리보기가 아직 참조할 수 있어 임시 에셋은 다음 요청에서 지운다. 저장한 에셋(dir 없음)은 남긴다.
+        if take["dir"]:
+            self.stale_dirs.append(take["dir"])
+        if self.selected == take_id:
+            self.selected = self.takes[-1]["id"] if self.takes else None
+            self.apply_selected()
+
+    def select_take(self, take_id):
+        if self.process is not None or self.find_take(take_id) is None:
+            return
+        self.selected = take_id
+        self.apply_selected()
+        take = self.selected_take()
+        self.message = f"Take #{take['number']} · {take['duration']:.2f}s · seed {take['seed']}"
+
+    def toggle_star(self, take_id):
+        take = self.find_take(take_id)
+        if take is not None:
+            take["starred"] = not take["starred"]
 
     @staticmethod
     def last_preview_file(work_dir):
@@ -293,11 +419,10 @@ class Panel:
         if saved_path and ASSETS.does_asset_exist(saved_path):
             clip = ASSETS.load_asset(saved_path)
             if isinstance(clip, u.AnimSequence):
-                self.saved_clip = clip
-                self.previous_motion = data.get("motion", "")
-                self.interpretation = data.get("interpretation", "")
-                self.english_prompt = data.get("english_prompt", "")
-                self.seed = data.get("seed")
+                # 저장한 에셋은 임시 폴더가 아니므로 dir 없이 테이크로 둔다(테이크를 지워도 에셋은 남는다).
+                self.add_take(clip, None, prompt=data.get("prompt", ""), english=data.get("english_prompt", ""),
+                              interpretation=data.get("interpretation", ""), motion=data.get("motion", ""),
+                              seed=data.get("seed"), saved=saved_path)
                 self.message = f"Restored saved clip · {saved_path}"
                 return
 
@@ -326,15 +451,9 @@ class Panel:
             self.delete_staging(staging)
             raise
 
-        self.discard_preview()
-
-        self.preview = clip
-        self.saved_clip = None
-        self.preview_dir = staging
-        self.previous_motion = data.get("motion", "")
-        self.interpretation = data.get("interpretation", "")
-        self.english_prompt = data.get("english_prompt", "")
-        self.seed = data.get("seed")
+        self.add_take(clip, staging, prompt=data.get("prompt", ""), english=data.get("english_prompt", ""),
+                      interpretation=data.get("interpretation", ""), motion=data.get("motion", ""),
+                      seed=data.get("seed"), target=target.get_name())
         self.message = f"Restored preview · {clip.get_play_length():.2f}s · seed {self.seed} · {target.get_name()} · {rig_label}"
 
     def start(self, prompt, duration_text, revision, config):
@@ -395,19 +514,22 @@ class Panel:
             "output_folder": config["output_folder"],
             "align_bones": list(config.get("align_bones", [])), "model": config.get("model") or "Kimodo-SOMA-RP-v1.2",
             "staging": config["output_folder"] + "/_Preview_" + job_id, "started": time.monotonic(),
-            "duration": duration, "seed": seed,
+            "duration": duration, "seed": seed, "request": prompt,
+            # 수정은 고른 테이크를 기준으로 하므로, 결과 테이크의 원래 요청을 "기준 + 수정"으로 남긴다.
+            "base_prompt": (self.selected_take() or {}).get("prompt", "") if revision else "",
         }
-        # Llama 3 8B 텍스트 인코더 위치. GPU는 VRAM이 16 GB 이상일 때만 의미가 있어 기본은 CPU(RAM 약 32 GB).
-        device = (config.get("text_encoder_device") or "cpu").lower()
+        # Llama 3 8B 텍스트 인코더 방식. 기본 stream은 층을 하나씩 읽어 RAM 1~2 GB로 돌고,
+        # cpu/cuda/auto는 모델 전체(약 16 GB)를 올린다. 어느 쪽이든 같은 프롬프트는 캐시를 쓴다.
+        device = (config.get("text_encoder_device") or "stream").lower()
         if device not in TEXT_ENCODER_DEVICES:
-            device = "cpu"
+            device = "stream"
         env = dict(
             os.environ, HF_HUB_CACHE=str(cache), HF_HUB_OFFLINE="1",
-            TEXT_ENCODER_MODE="local", TEXT_ENCODER_DEVICE=device, PYTHONUNBUFFERED="1",
+            TEXT_ENCODER_MODE="local", TEXT_ENCODER_DEVICE="cpu" if device.startswith("stream") else device,
+            KIMODO_TEXT_ENCODER=device, KIMODO_EMBEDDING_CACHE=str(cache / "kimodo-text-embeddings"),
+            PYTHONUNBUFFERED="1",
         )
         self.job.update(python=python, env=env)
-        self.job["previous_interpretation"] = self.interpretation
-        self.job["previous_english_prompt"] = self.english_prompt
         request = {
             "request": prompt, "duration_seconds": duration,
             "previous_motion": self.previous_motion if revision else "",
@@ -441,7 +563,6 @@ class Panel:
         self.job = {
             "folder": folder, "stage": "Setup", "started": time.monotonic(), "duration": 0,
             "progress": progress, "cache": Path(config["model_cache"]),
-            "previous_interpretation": self.interpretation, "previous_english_prompt": self.english_prompt,
         }
 
         # 토큰은 설치 프로세스의 환경변수로만 전달하고 파일이나 로그에 남기지 않는다.
@@ -471,7 +592,7 @@ class Panel:
         self.english_prompt = prompt
         duration = self.job["duration"]
         self.launch([
-            str(self.job["python"]), "-m", "kimodo.scripts.generate", "--model", self.job["model"],
+            str(self.job["python"]), str(SCRIPTS / "kimodo_generate.py"), "--model", self.job["model"],
             "--duration", str(duration), "--num_samples", "1", "--seed", str(self.job["seed"]), "--bvh",
             "--bvh_standard_tpose", "--no-postprocess", "--output", str(folder / "SOMA"),
             "--", prompt,
@@ -501,15 +622,9 @@ class Panel:
                 size = folder_size_gb(self.job["cache"])
                 self.message = (f"Setup {step} · {progress.get('message', 'Starting…')} · "
                                 f"models {size:.1f} GB · {elapsed}s elapsed")
-                latest = last_log_line(folder / "Setup.log")
-                if latest:
-                    self.message += f"\n{latest}"
                 return
-            self.message = f"{stage} · {self.job['duration']:g}s clip · {elapsed}s elapsed…"
-            # 실제로 진행 중인지 보이도록 단계 로그의 마지막 줄을 함께 보여 준다.
-            latest = last_log_line(folder / (stage + ".log"))
-            if latest:
-                self.message += f"\n{latest}"
+            # 단계·진행률·로그 마지막 줄은 progress()로 따로 넘겨 진행 막대와 툴팁에 보여 준다.
+            self.message = f"{self.job['duration']:g}s clip · seed {self.job['seed']} · {elapsed}s elapsed"
             return
 
         self.process = None
@@ -554,14 +669,15 @@ class Panel:
             self.delete_staging(staging)
             raise
 
-        self.discard_preview()
         self.restorable = None
-        self.preview = clip
-        self.saved_clip = None
-        self.preview_dir = staging
-        self.previous_motion = self.job["motion"]
-        self.seed = self.job["seed"]
+        request = self.job["request"]
+        if self.job["base_prompt"]:
+            request = f"{self.job['base_prompt']} → {request}"
+        self.add_take(clip, staging, prompt=request, english=self.english_prompt,
+                      interpretation=self.interpretation, motion=self.job["motion"],
+                      seed=self.job["seed"], target=target.get_name())
         self.save_last_preview_state(self.job["work_dir"], {
+            "prompt": request,
             "glb": str(self.job["folder"] / "SOMA_Motion.glb"),
             "target_mesh": self.job["target_mesh_path"] or target.get_path_name(),
             "target_rig": self.job["target_rig_path"],
@@ -597,12 +713,11 @@ class Panel:
         except subprocess.TimeoutExpired:
             u.log_warning(f"Kimodo process {process.pid} did not exit after cancellation.")
 
-        # 직전 성공 미리보기의 해석과 프롬프트로 되돌린다.
+        # 선택한 테이크의 해석과 프롬프트로 되돌린다.
         stage = self.job["stage"]
         self.process = None
-        self.interpretation = self.job["previous_interpretation"]
-        self.english_prompt = self.job["previous_english_prompt"]
         self.job = None
+        self.apply_selected()
         self.message = f"Cancelled during {stage}. The previous preview is unchanged."
 
     @staticmethod
@@ -611,44 +726,62 @@ class Panel:
             if not ASSETS.delete_directory(path):
                 u.log_warning(f"Could not remove temporary Kimodo assets in {path}")
 
-    def discard_preview(self):
-        if self.preview is None:
-            return
-
-        # C++ 미리보기가 새 클립으로 바뀐 뒤에 지우도록 다음 요청까지 미룬다.
-        self.preview = None
-        self.stale_dirs.append(self.preview_dir)
-        self.preview_dir = None
-
     def delete_stale_previews(self):
         for path in self.stale_dirs:
             self.delete_staging(path)
         self.stale_dirs.clear()
 
+    def progress(self):
+        """(단계 이름, 진행률 0~1 또는 -1, 로그 마지막 줄). 작업이 없으면 ("", -1, "")."""
+        if self.process is None or self.job is None:
+            return "", -1.0, ""
+        stage = self.job["stage"]
+        folder = self.job["folder"]
+        detail = last_log_line(folder / (stage + ".log"))
+        if stage == "Setup":
+            info = self.setup_progress()
+            total = info.get("total") or 0
+            return "Installing", (info.get("step", 0) / total if total else -1.0), detail
+        if stage == "Interpretation":
+            return "Interpreting request", -1.0, detail
+        if stage == "Kimodo":
+            label, fraction = kimodo_progress(folder / "Kimodo.log")
+            return label, fraction, detail
+        if stage == "Conversion":
+            return "Converting to glTF", -1.0, detail
+        return stage, -1.0, detail
+
     def save(self, name, config):
-        if self.preview is None or self.process is not None:
+        take = self.selected_take()
+        if take is None or self.process is not None:
             return
         name = name.strip()
         if not re.fullmatch(r"\w+", name):
             raise ValueError("Use letters, numbers, or underscores in the AnimSequence name.")
-        destination = f"{config['output_folder']}/{name}"
+        # 패널에서 저장 폴더를 고르지 않았으면 프로젝트 설정의 출력 폴더에 저장한다.
+        folder = (config.get("save_folder") or "").strip().rstrip("/") or config["output_folder"]
+        if not re.fullmatch(r"(/[\w\-]+)+", folder):
+            raise ValueError(f"Invalid save folder: {folder}. Pick a content folder such as /Game/Kimodo.")
+        destination = f"{folder}/{name}"
         if ASSETS.does_asset_exist(destination):
             raise ValueError(f"{destination} already exists. Enter another name.")
-        saved = ASSETS.duplicate_asset(self.preview.get_path_name(), destination)
+        saved = ASSETS.duplicate_asset(take["clip"].get_path_name(), destination)
         if not saved:
             raise RuntimeError(f"Could not create {destination}.")
         if not ASSETS.save_loaded_asset(saved, False):
             ASSETS.delete_loaded_asset(saved)
             raise RuntimeError(f"Could not save {destination}.")
-        self.discard_preview()
+        # 테이크는 남겨 두어 다른 테이크와 계속 비교하거나 다시 저장할 수 있게 한다.
+        take["saved"] = destination
         self.saved_clip = saved
         if config.get("work_dir"):
             self.save_last_preview_state(config["work_dir"], {
                 "saved_clip": destination,
-                "motion": self.previous_motion,
-                "interpretation": self.interpretation,
-                "english_prompt": self.english_prompt,
-                "seed": self.seed,
+                "prompt": take["prompt"],
+                "motion": take["motion"],
+                "interpretation": take["interpretation"],
+                "english_prompt": take["english"],
+                "seed": take["seed"],
             })
         self.message = f"Saved {destination}"
 
@@ -674,12 +807,14 @@ def dispatch(encoded_payload):
     payload = json.loads(b64decode(encoded_payload).decode("utf-8"))
     action = payload.get("action", "poll")
     value = payload.get("value", "")
+    was_working = panel.process is not None and panel.job is not None and panel.job.get("stage") != "Setup"
+    event = ""
     try:
         panel.delete_stale_previews()
         if action in ("generate", "revise"):
             panel.start(value, payload.get("duration", ""), action == "revise", payload)
         elif action == "poll":
-            if not panel.restored and panel.process is None and panel.preview is None and panel.saved_clip is None:
+            if not panel.restored and panel.process is None and not panel.takes:
                 panel.restored = True
                 try:
                     panel.check_last_preview(payload)
@@ -692,30 +827,57 @@ def dispatch(encoded_payload):
             panel.save(value, payload)
         elif action == "cancel":
             panel.cancel()
+            was_working = False
         elif action == "setup":
             panel.start_setup(payload, value)
+        elif action == "select":
+            panel.select_take(value)
+        elif action == "star":
+            panel.toggle_star(value)
+        elif action == "discard":
+            if panel.process is None:
+                panel.remove_take(value)
     except Exception as error:
         u.log_error(traceback.format_exc())
         panel.message = str(error)
         if panel.process is None:
-            if panel.job is not None:
-                panel.interpretation = panel.job["previous_interpretation"]
-                panel.english_prompt = panel.job["previous_english_prompt"]
             panel.job = None
+            panel.apply_selected()
+    # 생성이 이번 요청에서 끝났으면 C++이 에디터 알림을 띄우도록 알려 준다.
+    if was_working and panel.process is None:
+        event = "failed" if panel.job is None and not panel.message.startswith("Preview ready") else "ready"
     # 설치 상태: installing, ready, missing:<빠진 항목>
     if panel.job is not None and panel.job.get("stage") == "Setup":
         setup = "installing"
     else:
         state, missing = setup_state(payload)
         setup = state if state == "ready" else f"missing:{missing}"
-    # 상태 줄은 Base64로 넘기므로 줄바꿈은 그대로 두고 필드 구분자만 바꾼다.
-    message = clean_text(panel.message.replace("|", "/"))
-    clip = panel.preview or panel.saved_clip
-    path = clip.get_path_name() if clip else ""
-    interpretation = clean_text(panel.interpretation.replace("|", "/"))
-    english = clean_text(panel.english_prompt.replace("|", "/").replace("\n", " "))
-    restorable = int(panel.restorable is not None and panel.process is None)
-    line = (f"{int(panel.process is not None)}|{int(panel.preview is not None)}|"
-            f"{message}|{path}|{int(bool(panel.previous_motion))}|{interpretation}|{english}|"
-            f"{setup.replace('|', '/')}|{restorable}|{'' if panel.seed is None else panel.seed}")
-    return b64encode(line.encode("utf-8")).decode("ascii")
+
+    stage, fraction, detail = panel.progress()
+    take = panel.selected_take()
+    folder = save_folder_of(payload)
+    state = {
+        "busy": panel.process is not None,
+        "has_preview": take is not None,
+        "message": clean_text(panel.message),
+        "detail": clean_text(detail),
+        "stage": stage,
+        "progress": fraction,
+        "event": event,
+        "path": take["clip"].get_path_name() if take else "",
+        "can_revise": bool(panel.previous_motion),
+        "interpretation": clean_text(panel.interpretation),
+        "english": clean_text(panel.english_prompt.replace("\n", " ")),
+        "setup": setup,
+        "restorable": panel.restorable is not None and panel.process is None,
+        "seed": "" if panel.seed is None else str(panel.seed),
+        "selected": panel.selected or "",
+        "suggested_name": suggest_name(take, folder) if take else "",
+        "takes": [{
+            "id": t["id"], "number": t["number"], "prompt": clean_text(t["prompt"] or t["english"]),
+            "seed": "" if t["seed"] is None else str(t["seed"]), "duration": round(t["duration"], 2),
+            "starred": t["starred"], "saved": t["saved"], "target": t["target"],
+        } for t in reversed(panel.takes)],  # 최신 테이크가 위로
+    }
+    # Base64(UTF-8)로 감싸 EvaluateStatement의 repr 결과에서도 한글이 그대로 전달되게 한다.
+    return b64encode(json.dumps(state, ensure_ascii=False).encode("utf-8")).decode("ascii")
