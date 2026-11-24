@@ -5,6 +5,8 @@ NVIDIA의 모션 생성 모델 [Kimodo](https://github.com/nv-tlabs/kimodo)를 *
 
 버전 **1.0.0** · 변경 내역은 [CHANGELOG.md](CHANGELOG.md) · 라이선스 [MIT](LICENSE)
 
+![Kimodo Animation 패널: 왼쪽 미리보기, 오른쪽 Target · Prompt · Takes · Save](Resources/Readme/panel.png)
+
 ```
 "Walk forward four steps"
    │  (선택) CLI 에이전트가 영어 동작 설명으로 다듬기
@@ -116,6 +118,8 @@ Save → /Game/... 의 AnimSequence
 
 ## 빠른 시작
 
+![처음 연 패널: 대상 메시를 고르고 프롬프트를 적은 뒤 Generate](Resources/Readme/panel-empty.png)
+
 1. **Target**에서 대상 스켈레탈 메시를 고릅니다(예: `SKM_Manny_Simple`). IK Rig와 Retargeter는 비워 두면 자동입니다.
 2. **Prompt**에 영어로 동작을 적습니다. 예: `Wave the right hand`, `Walk forward four steps`
 3. **Duration**(초)을 정하고 **Generate**(`Ctrl+Enter`)를 누릅니다.
@@ -193,6 +197,8 @@ Kimodo는 이동(앞으로 걷기, 점프해서 나아가기 등)을 모두 **pe
 | **끔**(기본) | root 고정, 이동은 pelvis에 남음 | 제자리 루프(걷기 사이클 등), 블렌드 스페이스 |
 | **켬** | pelvis의 수평 이동으로 root 이동을 만들고 바닥 높이에 붙임. 시퀀스의 `Enable Root Motion`도 켬 | 캐릭터를 실제로 이동시키는 동작(몽타주, 루트 모션 기반 이동) |
 
+![Root motion을 켠 테이크: 바닥에 루트 경로(노란 선, 시작 초록 + / 끝 빨강 +)가 그려짐](Resources/Readme/root-motion.png)
+
 - 켜고 만든 테이크는 상태 줄에 `· root motion`이 붙고, 미리보기에서 캐릭터가 이동하며 경로가 그려집니다.
 - 설정은 **새로 만드는 테이크**에 적용됩니다. 이미 만든 테이크는 바뀌지 않습니다.
 - Retargeter를 직접 지정하면 그 에셋의 Root Motion 설정을 따릅니다.
@@ -236,6 +242,8 @@ Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차
 ## 설정 항목
 
 ### Project Settings > Plugins > Kimodo Animation (프로젝트 공용, `DefaultEditor.ini`)
+
+![Project Settings > Plugins > Kimodo Animation](Resources/Readme/settings.png)
 
 | 항목 | 설명 |
 |---|---|
