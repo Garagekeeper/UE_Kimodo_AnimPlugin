@@ -17,8 +17,11 @@ import unreal as u
 
 SCRIPTS = Path(__file__).resolve().parent
 KEPT_JOBS = 20
-# 패널에 남겨 둘 테이크 수. 넘으면 별표 없는 가장 오래된 테이크의 임시 에셋부터 지운다.
-MAX_TAKES = 8
+# 테이크 목록 최대 길이. 넘으면 별표 없는 가장 오래된 테이크부터 목록에서 뺀다.
+MAX_TAKES = 20
+# 메모리에 올려 둘 프리뷰 수. 테이크 결과는 Saved/Kimodo/TakeAssets에 에셋 파일로 남겨 두므로
+# 다시 불러오는 데 수십 ms면 된다. 캐시가 없는 예전 테이크만 고를 때 glTF를 다시 가져온다.
+MAX_LOADED = MAX_TAKES
 AGENT_NAMES = ("codex", "claude", "gemini")
 ASSETS = u.get_editor_subsystem(u.EditorAssetSubsystem)
 retarget = runpy.run_path(str(SCRIPTS / "retarget.py"))["retarget"]
@@ -106,14 +109,74 @@ def resolve_target(config):
     return target, generate_ik_rig(target), None, "auto-generated IK Rig"
 
 
-def import_and_retarget(glb, staging, target, rig, align_bones, retargeter):
-    """glTF 가져오기와 리타게팅. 에셋 작업이라 게임 스레드에서만 돌 수 있으므로 진행 창을 띄워 멈춘 것처럼 보이지 않게 한다."""
+def import_and_retarget(glb, staging, target, rig, align_bones, retargeter, output=None, name="KimodoPreview",
+                        root_motion=False):
+    """glTF 가져오기와 리타게팅. 에셋 작업이라 게임 스레드에서만 돌 수 있으므로 진행 창을 띄워 멈춘 것처럼 보이지 않게 한다.
+    원본은 staging/Source에, 결과 클립은 output 폴더(기본 staging)에 name으로 만든다."""
     with u.ScopedSlowTask(2, "Importing the Kimodo motion…") as task:
         task.make_dialog(False)
         task.enter_progress_frame(1, "Importing the Kimodo motion…")
         mesh, motion = import_gltf(glb, staging + "/Source")
         task.enter_progress_frame(1, f"Retargeting to {target.get_name()}…")
-        return retarget(ASSETS, mesh, motion, target, rig, staging, list(align_bones or []), retargeter)
+        return retarget(ASSETS, mesh, motion, target, rig, output or staging, list(align_bones or []), retargeter,
+                        name, root_motion)
+
+
+# 테이크 루트(/KimodoTakes) 아래 구조: Preview/Take_<id> 클립만 남고, _Import/<id>는 가져오는 동안만 쓰고 지운다.
+PREVIEW_SUBFOLDER = "Preview"
+IMPORT_SUBFOLDER = "_Import"
+
+
+def take_staging(config, fallback_folder):
+    """새 테이크를 가져올 임시 폴더. C++이 /KimodoTakes 마운트(Saved/Kimodo/TakeAssets)를 알려 주면 그 아래에 둔다."""
+    root = (config.get("take_root") or "").rstrip("/")
+    if root:
+        return f"{root}/{IMPORT_SUBFOLDER}/{uuid4().hex[:12]}"
+    return f"{fallback_folder}/_Preview_{uuid4().hex[:12]}"
+
+
+def delete_asset_path(path):
+    """폴더면 폴더째, 에셋 경로면 그 에셋만 지운다."""
+    if ASSETS.does_directory_exist(path):
+        return ASSETS.delete_directory(path)
+    if ASSETS.does_asset_exist(path):
+        return ASSETS.delete_asset(path)
+    return True
+
+
+def cleanup_path(clip, staging):
+    """테이크를 버릴 때 지울 경로. 테이크 루트에서 가져왔으면 Preview 폴더의 클립 하나, 아니면 임시 폴더."""
+    return clip.get_path_name() if f"/{IMPORT_SUBFOLDER}/" in staging else staging
+
+
+def build_take_clip(glb, staging, target, rig, align_bones, retargeter, take_root, root_motion=False, label=None):
+    """glTF 가져오기 + 리타게팅. 테이크 루트 아래라면 결과 클립을 Preview 폴더에 저장하고 가져온 원본은 지운다.
+    (클립, 캐시 경로) — 캐시하지 않으면 캐시 경로는 ""."""
+    root = (take_root or "").rstrip("/")
+    cache = bool(root) and staging.startswith(f"{root}/{IMPORT_SUBFOLDER}/")
+    output = f"{root}/{PREVIEW_SUBFOLDER}" if cache else staging
+    key = staging.rsplit('/', 1)[1]
+    # label = (번호, 프롬프트, 시드). 없으면 예전처럼 Take_<id>.
+    name = (preview_name(*label, key) if label else f"Take_{key}") if cache else "KimodoPreview"
+    try:
+        clip = import_and_retarget(glb, staging, target, rig, align_bones, retargeter, output, name, root_motion)
+        if clip.get_editor_property("skeleton") != target.get_editor_property("skeleton"):
+            raise RuntimeError(f"Retargeting did not produce an animation for {target.get_name()}.")
+    except Exception:
+        if cache:
+            delete_asset_path(f"{output}/{name}")
+        raise
+    clip.set_preview_skeletal_mesh(target)
+    if not cache:
+        return clip, ""
+    # 리타게팅이 끝나면 SOMA 원본 메시와 애니메이션은 필요 없다.
+    delete_asset_path(staging)
+    if not ASSETS.list_assets(f"{root}/{IMPORT_SUBFOLDER}", True, True):
+        ASSETS.delete_directory(f"{root}/{IMPORT_SUBFOLDER}")
+    if not ASSETS.save_loaded_asset(clip, False):
+        u.log_warning(f"Could not cache Kimodo take {clip.get_path_name()}; it will be re-imported next time.")
+        return clip, ""
+    return clip, clip.get_path_name()
 
 
 def import_gltf(path, destination):
@@ -138,14 +201,15 @@ def import_gltf(path, destination):
     return mesh, clip
 
 
-def prune_jobs(jobs):
+def prune_jobs(jobs, keep=()):
     if not jobs.is_dir():
         return
 
-    # 새 작업 폴더를 만들기 전에 최근 작업 로그만 남긴다.
+    # 새 작업 폴더를 만들기 전에 최근 작업 로그만 남긴다. 테이크 목록이 참조하는 폴더(원본 glTF)는 남긴다.
     folders = sorted((p for p in jobs.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
     for folder in folders[KEPT_JOBS - 1:]:
-        shutil.rmtree(folder, ignore_errors=True)
+        if str(folder).lower() not in keep:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 TEXT_ENCODER_REPOS = (
@@ -274,11 +338,21 @@ NAME_STOP_WORDS = {
 }
 
 
+def prompt_core(text):
+    """프롬프트의 핵심 단어 3개를 이어 붙인 이름 조각(예: WaveRightHand)."""
+    words = [w for w in re.findall(r"[A-Za-z]+", text or "") if w.lower() not in NAME_STOP_WORDS]
+    return "".join(w.capitalize() for w in words[:3]) or "Motion"
+
+
+def preview_name(number, text, seed, key):
+    """테이크 프리뷰 클립 이름: T<번호>_<핵심 단어>_s<시드>_<고유 4자리>. 목록·콘텐츠 브라우저에서 바로 구분된다.
+    번호는 세션마다 다시 시작할 수 있어 고유 4자리로 겹침을 막는다."""
+    return f"T{int(number or 0):02d}_{prompt_core(text)}_s{seed}_{key[:4]}"
+
+
 def suggest_name(take, folder):
     """AS_Kimodo_<핵심 단어 3개>_s<시드>. 같은 이름이 있으면 _2, _3을 붙인다."""
-    words = [w for w in re.findall(r"[A-Za-z]+", take.get("english") or take.get("prompt") or "")
-             if w.lower() not in NAME_STOP_WORDS]
-    core = "".join(w.capitalize() for w in words[:3]) or "Motion"
+    core = prompt_core(take.get("english") or take.get("prompt"))
     base = f"AS_Kimodo_{core}_s{take.get('seed')}"
     name, index = base, 2
     while folder and ASSETS.does_asset_exist(f"{folder}/{name}"):
@@ -325,6 +399,10 @@ class Panel:
         self.takes = []
         self.selected = None
         self.take_counter = 0
+        self.work_dir = ""
+        self.persisted = ""
+        self.use_counter = 0
+        self.restore_selected_number = None
 
     # -- takes -----------------------------------------------------------------
     def find_take(self, take_id):
@@ -343,19 +421,98 @@ class Panel:
         self.interpretation = take["interpretation"] if take else ""
         self.english_prompt = take["english"] if take else ""
 
-    def add_take(self, clip, directory, **info):
-        self.take_counter += 1
+    def make_take(self, clip, directory, number=None, **info):
+        if number is None:
+            self.take_counter += 1
+            number = self.take_counter
         take = {
-            "id": uuid4().hex[:12], "number": self.take_counter, "clip": clip, "dir": directory,
+            "id": uuid4().hex[:12], "number": number, "clip": clip, "dir": directory,
             "prompt": "", "english": "", "interpretation": "", "motion": "", "seed": None,
-            "duration": clip.get_play_length(), "starred": False, "saved": "", "target": "",
+            "duration": clip.get_play_length() if clip else 0.0, "starred": False, "saved": "", "target": "",
+            "source": None, "cached": "", "used": 0,
         }
         take.update(info)
+        return take
+
+    def touch(self, take):
+        self.use_counter += 1
+        take["used"] = self.use_counter
+
+    def add_take(self, clip, directory, **info):
+        take = self.make_take(clip, directory, **info)
         self.takes.append(take)
         self.selected = take["id"]
+        self.touch(take)
         self.apply_selected()
         self.prune_takes()
+        self.unload_extra()
         return take
+
+    @staticmethod
+    def reloadable(take):
+        if take.get("cached") and ASSETS.does_asset_exist(take["cached"]):
+            return True
+        if take["saved"] and ASSETS.does_asset_exist(take["saved"]):
+            return True
+        source = take.get("source") or {}
+        return bool(source.get("glb")) and Path(source["glb"]).is_file()
+
+    def unload_take(self, take, delete=False):
+        """메모리에서 내린다. 캐시한 테이크는 파일을 남겨 두고, delete면(목록에서 뺄 때) 캐시도 지운다."""
+        if take["dir"] and (delete or not take.get("cached")):
+            # 임시 에셋은 C++ 미리보기가 놓은 뒤 다음 요청에서 지운다. 저장한 에셋(dir 없음)은 남긴다.
+            self.stale_dirs.append(take["dir"])
+            if delete:
+                take["cached"] = ""
+        take["clip"] = None
+        take["dir"] = None
+
+    def unload_extra(self):
+        """선택한 테이크를 포함해 최근에 본 MAX_LOADED개만 메모리에 둔다."""
+        loaded = sorted((t for t in self.takes if t["clip"] is not None and t["id"] != self.selected
+                         and self.reloadable(t)), key=lambda t: t["used"])
+        keep = MAX_LOADED - (1 if self.selected_take() and self.selected_take()["clip"] is not None else 0)
+        for take in loaded[:max(0, len(loaded) - keep)]:
+            self.unload_take(take)
+
+    def load_take(self, take, config):
+        """내려 둔 테이크를 다시 불러온다. 캐시한 결과 → 저장한 에셋 → 원본 glTF 리타게팅 순서로 시도한다."""
+        if take["clip"] is not None:
+            return
+        cached = take.get("cached") or ""
+        if cached and ASSETS.does_asset_exist(cached):
+            clip = ASSETS.load_asset(cached)
+            if isinstance(clip, u.AnimSequence):
+                take["clip"], take["dir"] = clip, cached
+                take["duration"] = clip.get_play_length()
+                return
+        saved = take["saved"]
+        if saved and ASSETS.does_asset_exist(saved):
+            clip = ASSETS.load_asset(saved)
+            if isinstance(clip, u.AnimSequence):
+                take["clip"], take["dir"] = clip, None
+                take["duration"] = clip.get_play_length()
+                return
+
+        source = take.get("source") or {}
+        glb = Path(source.get("glb") or "")
+        if not glb.is_file():
+            raise FileNotFoundError(f"Take #{take['number']} can no longer be loaded: {glb} was deleted.")
+        target, rig, retargeter, _ = resolve_target(source)
+        output_folder = source.get("output_folder") or config.get("output_folder") or "/Game/Kimodo"
+        staging = take_staging(config, output_folder)
+        try:
+            clip, take["cached"] = build_take_clip(glb, staging, target, rig, source.get("align_bones"), retargeter,
+                                                   config.get("take_root") or "", bool(source.get("root_motion")),
+                                                   (take["number"], take.get("english") or take.get("prompt"),
+                                                    take.get("seed")))
+        except Exception:
+            self.delete_staging(staging)
+            raise
+        # 임시 에셋의 정리 대상: Preview 폴더의 클립 하나, 또는 (테이크 루트가 없을 때) 임시 폴더.
+        take["clip"], take["dir"] = clip, cleanup_path(clip, staging)
+        take["duration"] = clip.get_play_length()
+        take["target"] = target.get_name()
 
     def prune_takes(self):
         while len(self.takes) > MAX_TAKES:
@@ -369,19 +526,27 @@ class Panel:
         if take is None:
             return
         self.takes.remove(take)
-        # C++ 미리보기가 아직 참조할 수 있어 임시 에셋은 다음 요청에서 지운다. 저장한 에셋(dir 없음)은 남긴다.
-        if take["dir"]:
-            self.stale_dirs.append(take["dir"])
+        if take["clip"] is None and take.get("cached"):
+            # 메모리에 없는 캐시 테이크도 파일을 지운다.
+            take["dir"] = take["cached"]
+        self.unload_take(take, delete=True)
         if self.selected == take_id:
-            self.selected = self.takes[-1]["id"] if self.takes else None
+            self.selected = None
+            # 다음으로 최근 테이크를 고르되, 메모리에 있는 것을 우선한다(다시 가져오지 않도록).
+            loaded = [t for t in self.takes if t["clip"] is not None]
+            fallback = max(loaded, key=lambda t: t["used"]) if loaded else None
+            self.selected = fallback["id"] if fallback else None
             self.apply_selected()
 
-    def select_take(self, take_id):
-        if self.process is not None or self.find_take(take_id) is None:
+    def select_take(self, take_id, config):
+        take = self.find_take(take_id)
+        if self.process is not None or take is None:
             return
+        self.load_take(take, config)
         self.selected = take_id
+        self.touch(take)
         self.apply_selected()
-        take = self.selected_take()
+        self.unload_extra()
         self.message = f"Take #{take['number']} · {take['duration']:.2f}s · seed {take['seed']}"
 
     def toggle_star(self, take_id):
@@ -389,72 +554,170 @@ class Panel:
         if take is not None:
             take["starred"] = not take["starred"]
 
-    @staticmethod
-    def last_preview_file(work_dir):
-        return Path(work_dir) / "last_preview.json"
+    # -- session persistence ----------------------------------------------------
+    # 에디터를 다시 열어도 테이크 목록을 되살릴 수 있도록, 테이크마다 원본 glTF와 대상 정보를 남긴다.
+    # 복원할 때는 목록만 되살리고, 마지막으로 보던 테이크 하나만 가져온다.
+    SESSION_FILE = "session_takes.json"
+    LEGACY_FILE = "last_preview.json"
 
-    def save_last_preview_state(self, work_dir, state):
+    @staticmethod
+    def take_entry(take):
+        return {
+            "number": take["number"], "prompt": take["prompt"], "english": take["english"],
+            "interpretation": take["interpretation"], "motion": take["motion"], "seed": take["seed"],
+            "duration": take["duration"], "starred": take["starred"], "saved": take["saved"],
+            "target": take["target"], "source": take.get("source"), "cached": take.get("cached", ""),
+        }
+
+    def persist_session(self):
+        """테이크 목록이 바뀌었을 때만 파일에 쓴다. 아직 복원하지 않은 이전 세션 항목도 함께 남긴다."""
+        if not self.work_dir:
+            return
+        entries = list(self.restorable or []) + [self.take_entry(t) for t in self.takes]
+        selected = self.selected_take()
+        data = {"selected_number": selected["number"] if selected else None, "takes": entries}
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+        if text == self.persisted:
+            return
         try:
-            path = self.last_preview_file(work_dir)
+            path = Path(self.work_dir) / self.SESSION_FILE
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            path.write_text(text, encoding="utf-8")
+            self.persisted = text
         except OSError as error:
-            u.log_warning(f"Could not save Kimodo last preview metadata: {error}")
+            u.log_warning(f"Could not save the Kimodo take list: {error}")
+
+    def referenced_job_folders(self):
+        """테이크가 원본 glTF를 참조하는 작업 폴더. 오래된 작업 폴더를 지울 때 남긴다."""
+        folders = set()
+        for entry in list(self.restorable or []) + [self.take_entry(t) for t in self.takes]:
+            glb = (entry.get("source") or {}).get("glb")
+            if glb:
+                folders.add(str(Path(glb).parent).lower())
+        return folders
 
     def check_last_preview(self, config):
-        """첫 poll에서 호출한다. 저장된 클립은 불러오기만 하면 되므로 바로 복원하고,
-        glTF를 다시 가져와야 하는 미리보기는 '직전 미리보기 복원' 버튼으로 미룬다."""
+        """첫 poll에서 호출한다. 에디터 시작을 막지 않도록 복원은 버튼을 눌렀을 때만 한다."""
+        if config.get("take_root"):
+            u.AssetRegistryHelpers.get_asset_registry().scan_paths_synchronous([config["take_root"]], True)
         work_dir = config.get("work_dir")
         if not work_dir:
             return
-        state_file = self.last_preview_file(work_dir)
-        if not state_file.is_file():
-            return
+        session = Path(work_dir) / self.SESSION_FILE
+        legacy = Path(work_dir) / self.LEGACY_FILE
+        entries = []
         try:
-            data = json.loads(state_file.read_text(encoding="utf-8"))
+            if session.is_file():
+                data = json.loads(session.read_text(encoding="utf-8"))
+                entries = data.get("takes", [])
+                self.restore_selected_number = data.get("selected_number")
+            elif legacy.is_file():
+                # 이전 버전은 마지막 미리보기 하나만 남겼다.
+                data = json.loads(legacy.read_text(encoding="utf-8"))
+                entries = [{
+                    "number": 1, "prompt": data.get("prompt", ""), "english": data.get("english_prompt", ""),
+                    "interpretation": data.get("interpretation", ""), "motion": data.get("motion", ""),
+                    "seed": data.get("seed"), "starred": False, "saved": data.get("saved_clip", ""),
+                    "source": None if data.get("saved_clip") else {
+                        key: data.get(key) for key in
+                        ("glb", "target_mesh", "target_rig", "retargeter", "align_bones", "output_folder",
+                         "root_motion")
+                    },
+                }]
         except (OSError, ValueError):
             return
 
-        saved_path = data.get("saved_clip") or ""
-        if saved_path and ASSETS.does_asset_exist(saved_path):
-            clip = ASSETS.load_asset(saved_path)
-            if isinstance(clip, u.AnimSequence):
-                # 저장한 에셋은 임시 폴더가 아니므로 dir 없이 테이크로 둔다(테이크를 지워도 에셋은 남는다).
-                self.add_take(clip, None, prompt=data.get("prompt", ""), english=data.get("english_prompt", ""),
-                              interpretation=data.get("interpretation", ""), motion=data.get("motion", ""),
-                              seed=data.get("seed"), saved=saved_path)
-                self.message = f"Restored saved clip · {saved_path}"
-                return
+        # 캐시 폴더는 프로젝트 단위(Saved/Kimodo/TakeAssets)라 다른 작업 폴더의 세션도 쓸 수 있다.
+        # 이 세션 목록에 없다고 지우면 남의 캐시를 지우게 되므로, 캐시는 테이크를 ✕로 뺄 때만 지운다.
+        self.migrate_take_folders(config, entries)
+        usable = [e for e in entries if self.entry_restorable(e)]
+        if usable:
+            self.restorable = usable
+            count = len(usable)
+            self.message = (f"{count} take{'s' if count != 1 else ''} from the previous session can be restored. "
+                            "Click Restore last session.")
 
-        if Path(data.get("glb") or "").is_file():
-            self.restorable = data
-            self.message = "The previous preview can be restored. Click Restore last preview."
+    @staticmethod
+    def migrate_take_folders(config, entries):
+        """이전 버전의 캐시 이름을 지금 형식(/KimodoTakes/Preview/T<번호>_<단어>_s<시드>_<id4>)으로 바꾼다.
+        - /KimodoTakes/<id>/KimodoPreview (테이크마다 폴더): 옮기고 빈 폴더를 지운다.
+        - /KimodoTakes/Preview/Take_<id> (id만 있는 이름): 알아보기 쉬운 이름으로 바꾼다."""
+        root = (config.get("take_root") or "").rstrip("/")
+        if not root:
+            return
+        preview = f"{root}/{PREVIEW_SUBFOLDER}"
+        for entry in entries:
+            cached = entry.get("cached") or ""
+            if not cached.startswith(root + "/") or not ASSETS.does_asset_exist(cached):
+                continue
+            package = cached.split(".", 1)[0]
+            if package.startswith(preview + "/"):
+                asset = package.rsplit("/", 1)[1]
+                if not asset.startswith("Take_"):
+                    continue
+                key, folder = asset[len("Take_"):], None
+            else:
+                key, folder = cached[len(root) + 1:].split("/", 1)[0], package.rsplit("/", 1)[0]
+            name = preview_name(entry.get("number"), entry.get("english") or entry.get("prompt"), entry.get("seed"), key)
+            moved = f"{preview}/{name}"
+            if ASSETS.does_asset_exist(moved) or (ASSETS.rename_asset(package, moved) and ASSETS.save_asset(moved, False)):
+                entry["cached"] = f"{moved}.{name}"
+                if folder:
+                    # 테이크 폴더에는 그 클립 하나만 있었다(남은 리디렉터 포함해 폴더째 지운다).
+                    ASSETS.delete_directory(folder)
+            else:
+                u.log_warning(f"Could not rename Kimodo take cache {cached} to {moved}")
+
+    @staticmethod
+    def entry_restorable(entry):
+        if entry.get("cached") and ASSETS.does_asset_exist(entry["cached"]):
+            return True
+        if entry.get("saved") and ASSETS.does_asset_exist(entry["saved"]):
+            return True
+        source = entry.get("source") or {}
+        return bool(source.get("glb")) and Path(source["glb"]).is_file()
 
     def restore_last_preview(self, config):
-        data = self.restorable
-        if self.process is not None or not data:
+        """이전 세션 테이크 목록을 되살리고 모두 불러온다. 이후 클릭은 불러온 클립을 바꾸기만 한다."""
+        entries = self.restorable
+        if self.process is not None or not entries:
             return
         self.restorable = None
 
-        glb = Path(data.get("glb") or "")
-        if not glb.is_file():
-            raise FileNotFoundError(f"The previous preview file {glb} no longer exists.")
-        target, rig, retargeter, rig_label = resolve_target(data)
-        output_folder = data.get("output_folder") or config.get("output_folder") or "/Game/Kimodo"
-        staging = f"{output_folder}/_Preview_Restored_{uuid4().hex[:8]}"
-        try:
-            clip = import_and_retarget(glb, staging, target, rig, data.get("align_bones"), retargeter)
-            if clip.get_editor_property("skeleton") != target.get_editor_property("skeleton"):
-                raise RuntimeError(f"Retargeting did not produce an animation for {target.get_name()}.")
-            clip.set_preview_skeletal_mesh(target)
-        except Exception:
-            self.delete_staging(staging)
-            raise
+        restored = []
+        for entry in entries:
+            restored.append(self.make_take(
+                None, None, entry.get("number"), prompt=entry.get("prompt", ""), english=entry.get("english", ""),
+                interpretation=entry.get("interpretation", ""), motion=entry.get("motion", ""),
+                seed=entry.get("seed"), duration=entry.get("duration") or 0.0, starred=bool(entry.get("starred")),
+                saved=entry.get("saved", ""), target=entry.get("target", ""), source=entry.get("source"),
+                cached=entry.get("cached", "")))
+        # 이전 세션 테이크를 앞(오래된 쪽)에 두고, 그사이 새로 만든 테이크를 뒤에 둔다.
+        current = self.takes
+        self.takes = restored + current
+        self.take_counter = max([self.take_counter] + [t["number"] for t in self.takes])
 
-        self.add_take(clip, staging, prompt=data.get("prompt", ""), english=data.get("english_prompt", ""),
-                      interpretation=data.get("interpretation", ""), motion=data.get("motion", ""),
-                      seed=data.get("seed"), target=target.get_name())
-        self.message = f"Restored preview · {clip.get_play_length():.2f}s · seed {self.seed} · {target.get_name()} · {rig_label}"
+        self.prune_takes()
+        # 클릭할 때 끊기지 않도록 Restore에서 전부 불러온다(최대 MAX_TAKES개 모두 메모리에 유지).
+        # 캐시한 테이크는 파일을 여는 것뿐이고, 캐시가 없는 예전 테이크만 여기서 한 번 리타게팅해 캐시로 만든다.
+        failed = 0
+        for take in [t for t in restored if t in self.takes]:
+            try:
+                self.load_take(take, config)
+            except Exception as error:
+                failed += 1
+                u.log_warning(f"Could not restore Kimodo take #{take['number']}: {error}")
+                # 불러올 수 없는 테이크는 목록에서 뺀다(나중에 클릭해도 다시 가져올 수 없다).
+                self.takes.remove(take)
+        restored = [t for t in restored if t in self.takes]
+        if not current and restored:
+            wanted = next((t for t in restored if t["number"] == self.restore_selected_number), restored[-1])
+            self.selected = wanted["id"]
+            self.touch(wanted)
+            self.apply_selected()
+        self.message = f"Restored {len(restored)} take{'s' if len(restored) != 1 else ''} from the previous session"
+        if failed:
+            self.message += f" ({failed} could not be restored; see the Output Log)"
 
     def start(self, prompt, duration_text, revision, config):
         if self.process is not None:
@@ -502,7 +765,7 @@ class Panel:
 
         job_id = uuid4().hex
         jobs = work_dir / "PanelJobs"
-        prune_jobs(jobs)
+        prune_jobs(jobs, self.referenced_job_folders())
         folder = jobs / job_id
         folder.mkdir(parents=True)
         self.job = {
@@ -512,8 +775,10 @@ class Panel:
             "target_rig_path": config.get("target_rig") or "",
             "retargeter_path": config.get("retargeter") or "",
             "output_folder": config["output_folder"],
+            "root_motion": bool(config.get("root_motion")),
             "align_bones": list(config.get("align_bones", [])), "model": config.get("model") or "Kimodo-SOMA-RP-v1.2",
-            "staging": config["output_folder"] + "/_Preview_" + job_id, "started": time.monotonic(),
+            "staging": take_staging(config, config["output_folder"]), "take_root": config.get("take_root") or "",
+            "started": time.monotonic(),
             "duration": duration, "seed": seed, "request": prompt,
             # 수정은 고른 테이크를 기준으로 하므로, 결과 테이크의 원래 요청을 "기준 + 수정"으로 남긴다.
             "base_prompt": (self.selected_take() or {}).get("prompt", "") if revision else "",
@@ -660,36 +925,33 @@ class Panel:
         staging = self.job["staging"]
         target = self.job["target"]
         try:
-            clip = import_and_retarget(self.job["folder"] / "SOMA_Motion.glb", staging, target, self.job["rig"],
-                                       self.job["align_bones"], self.job["retargeter"])
-            if clip.get_editor_property("skeleton") != target.get_editor_property("skeleton"):
-                raise RuntimeError(f"Retargeting did not produce an animation for {target.get_name()}.")
-            clip.set_preview_skeletal_mesh(target)
+            clip, cached = build_take_clip(self.job["folder"] / "SOMA_Motion.glb", staging, target, self.job["rig"],
+                                           self.job["align_bones"], self.job["retargeter"], self.job["take_root"],
+                                           self.job["root_motion"],
+                                           # add_take가 매길 번호(take_counter + 1)를 미리 이름에 쓴다.
+                                           (self.take_counter + 1, self.english_prompt or self.job["request"],
+                                            self.job["seed"]))
         except Exception:
             self.delete_staging(staging)
             raise
 
-        self.restorable = None
         request = self.job["request"]
         if self.job["base_prompt"]:
             request = f"{self.job['base_prompt']} → {request}"
-        self.add_take(clip, staging, prompt=request, english=self.english_prompt,
+        self.add_take(clip, cleanup_path(clip, staging), prompt=request, english=self.english_prompt,
                       interpretation=self.interpretation, motion=self.job["motion"],
-                      seed=self.job["seed"], target=target.get_name())
-        self.save_last_preview_state(self.job["work_dir"], {
-            "prompt": request,
-            "glb": str(self.job["folder"] / "SOMA_Motion.glb"),
-            "target_mesh": self.job["target_mesh_path"] or target.get_path_name(),
-            "target_rig": self.job["target_rig_path"],
-            "retargeter": self.job["retargeter_path"],
-            "align_bones": self.job["align_bones"],
-            "output_folder": self.job["output_folder"],
-            "motion": self.previous_motion,
-            "interpretation": self.interpretation,
-            "english_prompt": self.english_prompt,
-            "seed": self.seed,
-        })
+                      seed=self.job["seed"], target=target.get_name(), cached=cached, source={
+                          "glb": str(self.job["folder"] / "SOMA_Motion.glb"),
+                          "target_mesh": self.job["target_mesh_path"] or target.get_path_name(),
+                          "target_rig": self.job["target_rig_path"],
+                          "retargeter": self.job["retargeter_path"],
+                          "align_bones": self.job["align_bones"],
+                          "output_folder": self.job["output_folder"],
+                          "root_motion": self.job["root_motion"],
+                      })
         label = f"{target.get_name()} · {self.job['rig_label']}"
+        if self.job["root_motion"] and not self.job["retargeter"]:
+            label += " · root motion"
         self.job = None
         self.message = f"Preview ready · {clip.get_play_length():.2f}s · seed {self.seed} · {label}"
 
@@ -722,9 +984,8 @@ class Panel:
 
     @staticmethod
     def delete_staging(path):
-        if ASSETS.does_directory_exist(path):
-            if not ASSETS.delete_directory(path):
-                u.log_warning(f"Could not remove temporary Kimodo assets in {path}")
+        if not delete_asset_path(path):
+            u.log_warning(f"Could not remove temporary Kimodo assets in {path}")
 
     def delete_stale_previews(self):
         for path in self.stale_dirs:
@@ -753,7 +1014,7 @@ class Panel:
 
     def save(self, name, config):
         take = self.selected_take()
-        if take is None or self.process is not None:
+        if take is None or take["clip"] is None or self.process is not None:
             return
         name = name.strip()
         if not re.fullmatch(r"\w+", name):
@@ -774,15 +1035,6 @@ class Panel:
         # 테이크는 남겨 두어 다른 테이크와 계속 비교하거나 다시 저장할 수 있게 한다.
         take["saved"] = destination
         self.saved_clip = saved
-        if config.get("work_dir"):
-            self.save_last_preview_state(config["work_dir"], {
-                "saved_clip": destination,
-                "prompt": take["prompt"],
-                "motion": take["motion"],
-                "interpretation": take["interpretation"],
-                "english_prompt": take["english"],
-                "seed": take["seed"],
-            })
         self.message = f"Saved {destination}"
 
 
@@ -807,6 +1059,7 @@ def dispatch(encoded_payload):
     payload = json.loads(b64decode(encoded_payload).decode("utf-8"))
     action = payload.get("action", "poll")
     value = payload.get("value", "")
+    panel.work_dir = payload.get("work_dir") or panel.work_dir
     was_working = panel.process is not None and panel.job is not None and panel.job.get("stage") != "Setup"
     event = ""
     try:
@@ -831,7 +1084,7 @@ def dispatch(encoded_payload):
         elif action == "setup":
             panel.start_setup(payload, value)
         elif action == "select":
-            panel.select_take(value)
+            panel.select_take(value, payload)
         elif action == "star":
             panel.toggle_star(value)
         elif action == "discard":
@@ -853,30 +1106,32 @@ def dispatch(encoded_payload):
         state, missing = setup_state(payload)
         setup = state if state == "ready" else f"missing:{missing}"
 
+    panel.persist_session()
     stage, fraction, detail = panel.progress()
     take = panel.selected_take()
     folder = save_folder_of(payload)
     state = {
         "busy": panel.process is not None,
-        "has_preview": take is not None,
+        "has_preview": take is not None and take["clip"] is not None,
         "message": clean_text(panel.message),
         "detail": clean_text(detail),
         "stage": stage,
         "progress": fraction,
         "event": event,
-        "path": take["clip"].get_path_name() if take else "",
+        "path": take["clip"].get_path_name() if take and take["clip"] is not None else "",
         "can_revise": bool(panel.previous_motion),
         "interpretation": clean_text(panel.interpretation),
         "english": clean_text(panel.english_prompt.replace("\n", " ")),
         "setup": setup,
-        "restorable": panel.restorable is not None and panel.process is None,
+        "restorable": bool(panel.restorable) and panel.process is None,
+        "restore_count": len(panel.restorable or []),
         "seed": "" if panel.seed is None else str(panel.seed),
         "selected": panel.selected or "",
         "suggested_name": suggest_name(take, folder) if take else "",
         "takes": [{
             "id": t["id"], "number": t["number"], "prompt": clean_text(t["prompt"] or t["english"]),
             "seed": "" if t["seed"] is None else str(t["seed"]), "duration": round(t["duration"], 2),
-            "starred": t["starred"], "saved": t["saved"], "target": t["target"],
+            "starred": t["starred"], "saved": t["saved"], "target": t["target"], "loaded": t["clip"] is not None,
         } for t in reversed(panel.takes)],  # 최신 테이크가 위로
     }
     # Base64(UTF-8)로 감싸 EvaluateStatement의 repr 결과에서도 한글이 그대로 전달되게 한다.

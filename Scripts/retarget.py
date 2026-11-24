@@ -109,7 +109,7 @@ def target_bone_names(target):
         return None
 
 
-def build_retargeter(source, target, target_rig, align_bones):
+def build_retargeter(source, target, target_rig, align_bones, root_motion=False):
     # 대상 체인과 같은 이름의 SOMA 체인을 만들어 EXACT로 연결한다.
     source_rig = u.new_object(u.IKRigDefinition)
     sc = u.IKRigController.get_controller(source_rig)
@@ -153,21 +153,43 @@ def build_retargeter(source, target, target_rig, align_bones):
         bones = arm_starts
     if bones:
         rc.auto_align_bones(bones, u.RetargetAutoAlignMethod.CHAIN_TO_CHAIN, u.RetargetSourceOrTarget.TARGET)
+    if root_motion:
+        enable_root_motion_from_pelvis(rc)
     return settings
 
 
-def retarget(assets, source, animation, target, target_rig, staging, align_bones=(), retargeter=None):
+def enable_root_motion_from_pelvis(rc):
+    """Kimodo(SOMA)는 Root 본을 움직이지 않고 이동을 전부 Hips에 넣는다. 기본 Root Motion 작업은 소스 Root를
+    복사하므로 대상 root가 원점에 고정된다. 대신 대상 pelvis의 수평 이동으로 root를 만들고 높이는 바닥에 붙인다."""
+    index = rc.get_index_of_op_by_name("Root Motion")
+    if index < 0:
+        u.log_warning("The retargeter has no Root Motion op; the clip will have no root motion.")
+        return
+    op = rc.get_op_controller(index)
+    settings = op.get_settings()
+    settings.set_editor_property("root_motion_source", u.RootMotionSource.GENERATE_FROM_TARGET_PELVIS)
+    settings.set_editor_property("root_height_source", u.RootMotionHeightSource.SNAP_TO_GROUND)
+    op.set_settings(settings)
+
+
+def retarget(assets, source, animation, target, target_rig, staging, align_bones=(), retargeter=None,
+             name="KimodoPreview", root_motion=False):
+    # 사용자가 지정한 Retargeter는 그 설정(루트 모션 포함)을 그대로 쓴다.
     if retargeter is None:
-        retargeter = build_retargeter(source, target, target_rig, align_bones)
+        retargeter = build_retargeter(source, target, target_rig, align_bones, root_motion)
 
     inputs = u.IKRetargetBatchOperationInputs()
     inputs.set_editor_properties({
         "assets_to_retarget": [assets.find_asset_data(animation.get_path_name())],
         "source_mesh": source, "target_mesh": target, "ik_retarget_asset": retargeter,
-        "search": animation.get_name(), "replace": "KimodoPreview",
+        "search": animation.get_name(), "replace": name,
         "target_path": staging, "include_referenced_assets": False,
         "overwrite_existing_files": False,
     })
     result = u.IKRetargetBatchOperation.run_batch_retarget(inputs)
     assert len(result) == 1, result
-    return result[0].get_asset()
+    clip = result[0].get_asset()
+    if root_motion:
+        # 시퀀스에서도 루트 모션을 켜 둔다(저장한 클립을 바로 캐릭터에 쓸 수 있게).
+        clip.set_editor_property("enable_root_motion", True)
+    return clip

@@ -1,6 +1,8 @@
 #include "SKimodoPreview.h"
 
 #include "Animation/AnimSequence.h"
+#include "Animation/AnimSequenceHelpers.h"
+#include "Components/LineBatchComponent.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "AnimPreviewInstance.h"
 #include "EditorViewportClient.h"
@@ -81,6 +83,8 @@ void SKimodoPreview::Construct(const FArguments& Args)
 	Scene.AddComponent(Mesh, FTransform::Identity);
 	Mesh->SetUpdateAnimationInEditor(true);
 	Mesh->SetComponentTickEnabled(false);
+	RootPath = NewObject<ULineBatchComponent>(GetTransientPackage(), NAME_None, RF_Transient);
+	Scene.AddComponent(RootPath, FTransform::Identity);
 	Scene.SetFloorVisibility(true, true);
 	SEditorViewport::Construct(SEditorViewport::FArguments());
 	AddOverlayWidget(SNew(SKimodoOrbitInput).Preview(SharedThis(this)));
@@ -159,6 +163,11 @@ void SKimodoPreview::SetClip(UAnimSequence* Clip, float StartTime, bool bAutoPla
 	Mesh->SetSkeletalMesh(Clip ? Clip->GetPreviewMesh() : nullptr);
 	if (Clip) Mesh->EnablePreview(true, Clip);
 	if (Mesh->PreviewInstance) Mesh->PreviewInstance->SetPlaying(false);
+	// 미리보기 인스턴스는 루트 모션을 포즈에서 빼낸다. 그대로 두면 제자리에서 걷으므로 빼낸 이동을 메시 위치로 돌려준다.
+	CurrentClip = Clip;
+	bRootMotion = Clip && Clip->HasRootMotion();
+	Mesh->SetRelativeTransform(FTransform::Identity);
+	DrawRootMotionPath();
 	Seek(StartTime);
 	bPlaying = bAutoPlay && Length > 0.0f;
 }
@@ -176,6 +185,7 @@ void SKimodoPreview::Seek(float Seconds)
 	{
 		// 정지 상태에서도 지정 시점의 본 트랜스폼을 즉시 갱신한다.
 		Mesh->PreviewInstance->SetPosition(Time, false);
+		ApplyRootMotion();
 		Mesh->TickAnimation(UE_SMALL_NUMBER, true);
 		Mesh->RefreshBoneTransforms();
 		Mesh->MarkRenderDynamicDataDirty();
@@ -186,6 +196,42 @@ void SKimodoPreview::Seek(float Seconds)
 	{
 		PreviewClient->Invalidate();
 	}
+}
+
+void SKimodoPreview::ApplyRootMotion()
+{
+	if (!bRootMotion || !CurrentClip) return;
+
+	// 시작 루트 위치 + 0초~Time 사이의 루트 이동. 시간으로 바로 계산하므로 스크럽해도 위치가 맞고, 반복하면 처음 자리로 돌아온다.
+	const FTransform Start = UE::Anim::ExtractRootTransformFromAnimationAsset(CurrentClip, 0.0f);
+	const FTransform Delta = UE::Anim::ExtractRootMotionFromAnimationAsset(CurrentClip, nullptr, 0.0f, Time);
+	Mesh->SetRelativeTransform(Delta * Start);
+}
+
+void SKimodoPreview::DrawRootMotionPath()
+{
+	RootPath->Flush();
+	if (!bRootMotion || !CurrentClip || Length <= 0.0f) return;
+
+	const FTransform Start = UE::Anim::ExtractRootTransformFromAnimationAsset(CurrentClip, 0.0f);
+	const int32 Samples = FMath::Clamp(FMath::CeilToInt(Length * 30.0f), 2, 600);
+	const FVector Lift(0, 0, 0.5);  // 바닥과 겹쳐 깜빡이지 않게 살짝 띄운다.
+	const FLinearColor PathColor(1.0f, 0.75f, 0.1f);
+	FVector Previous = Start.GetLocation() + Lift;
+	for (int32 Index = 1; Index <= Samples; ++Index)
+	{
+		const float SampleTime = Length * Index / Samples;
+		const FTransform Delta = UE::Anim::ExtractRootMotionFromAnimationAsset(CurrentClip, nullptr, 0.0f, SampleTime);
+		const FVector Point = (Delta * Start).GetLocation() + Lift;
+		RootPath->DrawLine(Previous, Point, PathColor, SDPG_World, 1.5f, 0.0f);
+		Previous = Point;
+	}
+	// 시작(초록)·끝(빨강) 표시
+	const FVector First = Start.GetLocation() + Lift;
+	RootPath->DrawLine(First - FVector(6, 0, 0), First + FVector(6, 0, 0), FLinearColor::Green, SDPG_World, 1.5f, 0.0f);
+	RootPath->DrawLine(First - FVector(0, 6, 0), First + FVector(0, 6, 0), FLinearColor::Green, SDPG_World, 1.5f, 0.0f);
+	RootPath->DrawLine(Previous - FVector(6, 0, 0), Previous + FVector(6, 0, 0), FLinearColor::Red, SDPG_World, 1.5f, 0.0f);
+	RootPath->DrawLine(Previous - FVector(0, 6, 0), Previous + FVector(0, 6, 0), FLinearColor::Red, SDPG_World, 1.5f, 0.0f);
 }
 
 void SKimodoPreview::SetFollowEnabled(bool bEnabled)

@@ -97,6 +97,11 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Generation")
 	EKimodoTextEncoderDevice TextEncoderDevice = EKimodoTextEncoderDevice::LowMemory;
 
+	/** 켜면 pelvis의 수평 이동으로 root 본 이동(루트 모션)을 만들고 시퀀스의 Enable Root Motion도 켠다.
+	 *  끄면 root는 원점에 고정되고 이동은 pelvis에 남는다(제자리 루프용). Retargeter를 직접 지정하면 그 설정을 따른다. */
+	UPROPERTY(Config, EditAnywhere, Category = "Generation")
+	bool bRootMotion = false;
+
 	/** 패널에서 마지막으로 고른 값. 다음에 패널을 열 때 프로젝트 기본값보다 먼저 쓴다(설정 화면에는 표시하지 않음). */
 	UPROPERTY(Config)
 	FString LastTargetMesh;

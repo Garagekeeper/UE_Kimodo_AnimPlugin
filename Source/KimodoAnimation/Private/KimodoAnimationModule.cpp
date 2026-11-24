@@ -9,6 +9,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Framework/Notifications/NotificationManager.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
 #include "InputCoreTypes.h"
 #include "Interfaces/IPluginManager.h"
@@ -56,6 +57,13 @@
 namespace
 {
 const FName KimodoTabName(TEXT("KimodoAnimation"));
+/** 테이크 결과 에셋의 마운트 경로. 실제 파일은 Saved/Kimodo/TakeAssets에 있다. */
+const TCHAR* TakeRootPath = TEXT("/KimodoTakes/");
+
+FString GetTakeRootDir()
+{
+	return FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Kimodo/TakeAssets/"));
+}
 const TCHAR* KimodoPluginName = TEXT("KimodoAnimation");
 
 /** 환경변수 → 설정값 순서로 경로를 고르고, 상대 경로는 프로젝트 폴더 기준으로 바꾼다. */
@@ -170,6 +178,8 @@ struct FKimodoTake
 	bool bStarred = false;
 	FString Saved;
 	FString Target;
+	/** 프리뷰가 메모리에 올라와 있는지. 아니면 고를 때 원본 glTF를 다시 가져온다. */
+	bool bLoaded = false;
 };
 
 /** 같은 경로의 에셋이 실제로 있는지. 지난번 고른 에셋이 지워졌으면 프로젝트 기본값으로 돌아간다. */
@@ -207,18 +217,18 @@ public:
 		ChildSlot
 		[
 			SNew(SSplitter)
-			.Orientation(Orient_Vertical)
-			// 상단(크기 조절 가능): 3D 프리뷰와 재생 바
+			.Orientation(Orient_Horizontal)
+			// 왼쪽(폭 조절 가능): 3D 프리뷰와 재생 바. 오른쪽을 스크롤해도 프리뷰는 움직이지 않는다.
 			+ SSplitter::Slot()
-			.Value(0.45f)
-			.MinSize(160.0f)
+			.Value(0.5f)
+			.MinSize(280.0f)
 			[
 				MakePreviewArea()
 			]
-			// 하단: 단계별 구역(스크롤) + 항상 보이는 실행 바
+			// 오른쪽: 단계별 구역(스크롤) + 항상 보이는 실행 바
 			+ SSplitter::Slot()
-			.Value(0.55f)
-			.MinSize(200.0f)
+			.Value(0.5f)
+			.MinSize(360.0f)
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().FillHeight(1.0f)
@@ -302,11 +312,11 @@ private:
 	TSharedRef<SWidget> MakePreviewArea()
 	{
 		return SNew(SVerticalBox)
-			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8, 8, 8, 0)
+			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8, 8, 4, 0)
 			[
 				SAssignNew(Preview, SKimodoPreview)
 			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(8, 6, 8, 8)
+			+ SVerticalBox::Slot().AutoHeight().Padding(8, 6, 4, 8)
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth()
@@ -539,6 +549,28 @@ private:
 							})
 						]
 					]
+					// 루트 모션: Kimodo는 이동을 pelvis에만 넣으므로, 켜면 pelvis 이동으로 root 이동을 만든다.
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 6)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+						[
+							SNew(SBox).MinDesiredWidth(90)[SNew(STextBlock).Text(LOCTEXT("RootMotion", "Root motion"))]
+						]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[
+							SNew(SCheckBox)
+							.ToolTipText(LOCTEXT("RootMotionTip", "On: the root bone follows the pelvis on the ground and the clip has Enable Root Motion set (for moves that travel).\nOff: the root stays at the origin and the travel stays in the pelvis (for in-place loops).\nApplies to new takes. A custom Retargeter keeps its own root motion settings."))
+							.IsChecked_Lambda([] {
+								return GetDefault<UKimodoUserSettings>()->bRootMotion ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+							})
+							.OnCheckStateChanged_Lambda([](ECheckBoxState State) {
+								UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+								UserSettings->bRootMotion = State == ECheckBoxState::Checked;
+								UserSettings->SaveConfig();
+							})
+						]
+					]
 					// 텍스트 인코더 방식. 프로젝트 설정(Kimodo Animation (Local))과 같은 값을 바로 바꾼다.
 					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left)
 					[
@@ -587,8 +619,7 @@ private:
 							return;
 						}
 						RunAction(TEXT("select"), Item->Id);
-					})
-				]
+					})				]
 			]
 			// 고른 테이크의 해석과 실제 Kimodo 프롬프트. 드래그로 선택해 Ctrl+C로 복사할 수 있다.
 			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
@@ -658,7 +689,7 @@ private:
 					SNew(SButton)
 					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 					.ContentPadding(FMargin(2))
-					.ToolTipText(LOCTEXT("StarTip", "Star to keep this take. Unstarred takes beyond 8 are removed, oldest first."))
+					.ToolTipText(LOCTEXT("StarTip", "Star to keep this take in the list. Beyond 20 takes, the oldest unstarred ones are removed."))
 					.OnClicked_Lambda([this, Id] { return RunAction(TEXT("star"), Id); })
 					[
 						SNew(SImage)
@@ -676,7 +707,11 @@ private:
 				[
 					SNew(STextBlock)
 					.Text(FText::FromString(Item->Prompt))
-					.ToolTipText(FText::FromString(Item->Prompt))
+					// 메모리에 없는 테이크는 흐리게 보여 주고, 고르면 다시 가져온다는 것을 툴팁으로 알린다.
+					.ColorAndOpacity(Item->bLoaded ? FSlateColor::UseForeground() : FSlateColor::UseSubduedForeground())
+					.ToolTipText(Item->bLoaded
+						? FText::FromString(Item->Prompt)
+						: FText::Format(LOCTEXT("TakeNotLoaded", "{0}\n\nNot in memory. Selecting it re-imports the preview (a few seconds)."), FText::FromString(Item->Prompt)))
 					.OverflowPolicy(ETextOverflowPolicy::Ellipsis)
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8, 0, 0, 0)
@@ -826,8 +861,8 @@ private:
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
 						SNew(SButton)
-						.Text(LOCTEXT("Restore", "Restore last preview"))
-						.ToolTipText(LOCTEXT("RestoreTip", "Re-import and retarget the preview from the previous session."))
+						.Text_Lambda([this] { return FText::Format(LOCTEXT("Restore", "Restore last session ({0})"), FText::AsNumber(RestoreCount)); })
+						.ToolTipText(LOCTEXT("RestoreTip", "Bring back the take list from the previous session. Only the take you were viewing is re-imported; the others load when you select them."))
 						.Visibility_Lambda([this] { return bCanRestore && !bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
 						.OnClicked_Lambda([this] { return RunAction(TEXT("restore")); })
 					]
@@ -1019,9 +1054,12 @@ private:
 		Payload->SetStringField(TEXT("target_rig"), TargetRigPath);
 		Payload->SetStringField(TEXT("retargeter"), RetargeterPath);
 		Payload->SetStringField(TEXT("output_folder"), GetOutputFolder());
+		Payload->SetStringField(TEXT("take_root"), FString(TakeRootPath).LeftChop(1));
+		Payload->SetStringField(TEXT("take_root_dir"), GetTakeRootDir());
 		Payload->SetStringField(TEXT("save_folder"), SaveFolder.IsValid() ? SaveFolder->GetText().ToString().TrimStartAndEnd() : FString());
 		Payload->SetStringField(TEXT("model"), Settings->ModelName);
 		Payload->SetArrayField(TEXT("align_bones"), ToJsonArray(AlignBones));
+		Payload->SetBoolField(TEXT("root_motion"), UserSettings->bRootMotion);
 		Payload->SetStringField(TEXT("python"), ResolveLocalPath(TEXT("KIMODO_PYTHON"), TEXT("ECLIPSE_KIMODO_PYTHON"), UserSettings->PythonExecutable.FilePath, GetManagedPython()));
 		Payload->SetStringField(TEXT("model_cache"), ResolveLocalPath(TEXT("KIMODO_MODEL_CACHE"), TEXT("ECLIPSE_KIMODO_MODEL_CACHE"), UserSettings->ModelCacheDirectory.Path, GetManagedInstallRoot() / TEXT("model-cache")));
 		Payload->SetStringField(TEXT("bootstrap_python"), GetBootstrapPython());
@@ -1127,6 +1165,7 @@ private:
 		bHasPreview = State.GetBoolField(TEXT("has_preview"));
 		bCanRevise = State.GetBoolField(TEXT("can_revise"));
 		bCanRestore = State.GetBoolField(TEXT("restorable"));
+		RestoreCount = static_cast<int32>(State.GetNumberField(TEXT("restore_count")));
 		LastSeed = State.GetStringField(TEXT("seed"));
 		StageText = State.GetStringField(TEXT("stage"));
 		Progress = static_cast<float>(State.GetNumberField(TEXT("progress")));
@@ -1214,7 +1253,7 @@ private:
 			const FString PreviewPrefix = GetOutputFolder() / TEXT("_Preview_");
 			for (TObjectIterator<UPackage> Package; Package; ++Package)
 			{
-				if (Package->IsDirty() && Package->GetName().StartsWith(PreviewPrefix))
+				if (Package->IsDirty() && (Package->GetName().StartsWith(PreviewPrefix) || Package->GetName().StartsWith(TakeRootPath)))
 				{
 					Package->SetDirtyFlag(false);
 				}
@@ -1245,7 +1284,8 @@ private:
 				Take->bStarred = Object->GetBoolField(TEXT("starred"));
 				Take->Saved = Object->GetStringField(TEXT("saved"));
 				Take->Target = Object->GetStringField(TEXT("target"));
-				Signature += FString::Printf(TEXT("%s:%d:%s;"), *Take->Id, Take->bStarred ? 1 : 0, *Take->Saved);
+				Take->bLoaded = Object->GetBoolField(TEXT("loaded"));
+				Signature += FString::Printf(TEXT("%s:%d:%d:%s;"), *Take->Id, Take->bStarred ? 1 : 0, Take->bLoaded ? 1 : 0, *Take->Saved);
 				NewTakes.Add(Take);
 			}
 		}
@@ -1346,6 +1386,7 @@ private:
 	FText Status;
 	FText Interpretation;
 	float Progress = -1.0f;
+	int32 RestoreCount = 0;
 	bool bNeedsInitialState = true;
 	bool bBusy = false;
 	bool bHasPreview = false;
@@ -1359,6 +1400,11 @@ class FKimodoAnimationModule : public IModuleInterface
 public:
 	void StartupModule() override
 	{
+		// 테이크 결과를 Content가 아닌 Saved/Kimodo/TakeAssets에 에셋 파일로 둔다.
+		// Content Browser와 소스 관리에 섞이지 않고, 테이크를 다시 고르거나 복원할 때 가져오기 없이 바로 연다.
+		IFileManager::Get().MakeDirectory(*GetTakeRootDir(), true);
+		FPackageName::RegisterMountPoint(TakeRootPath, GetTakeRootDir());
+
 		FGlobalTabmanager::Get()->RegisterNomadTabSpawner(KimodoTabName,
 			FOnSpawnTab::CreateRaw(this, &FKimodoAnimationModule::SpawnKimodoTab))
 			.SetDisplayName(LOCTEXT("Tab", "Kimodo Animation"))
@@ -1372,6 +1418,12 @@ public:
 		UToolMenus::UnRegisterStartupCallback(this);
 		UToolMenus::UnregisterOwner(this);
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(KimodoTabName);
+		// 에디터 종료 중에는 해제하지 않는다. 이때는 Content Browser 데이터 서브시스템이 먼저 정리되어
+		// 마운트 해제 알림(OnContentPathDismounted)을 받은 쪽이 null을 참조해 크래시한다. 프로세스가 끝나므로 해제할 필요도 없다.
+		if (!IsEngineExitRequested())
+		{
+			FPackageName::UnRegisterMountPoint(TakeRootPath, GetTakeRootDir());
+		}
 	}
 
 private:
