@@ -26,16 +26,17 @@ Save → /Game/... 의 AnimSequence
 2. [설치](#설치)
 3. [Kimodo 설치 (패널에서 한 번)](#kimodo-설치-패널에서-한-번)
 4. [빠른 시작](#빠른-시작)
-5. [패널 사용법](#패널-사용법)
-6. [루트 모션](#루트-모션)
-7. [테이크와 저장 위치](#테이크와-저장-위치)
-8. [텍스트 인코더와 메모리](#텍스트-인코더와-메모리)
-9. [설정 항목](#설정-항목)
-10. [파일과 폴더](#파일과-폴더)
-11. [문제 해결](#문제-해결)
-12. [제한 사항](#제한-사항)
-13. [제거](#제거)
-14. [라이선스](#라이선스)
+5. [프롬프트 작성 요령](#프롬프트-작성-요령)
+6. [패널 사용법](#패널-사용법)
+7. [루트 모션](#루트-모션)
+8. [테이크와 저장 위치](#테이크와-저장-위치)
+9. [텍스트 인코더와 메모리](#텍스트-인코더와-메모리)
+10. [설정 항목](#설정-항목)
+11. [파일과 폴더](#파일과-폴더)
+12. [문제 해결](#문제-해결)
+13. [제한 사항](#제한-사항)
+14. [제거](#제거)
+15. [라이선스](#라이선스)
 
 ---
 
@@ -127,6 +128,42 @@ Save → /Game/... 의 AnimSequence
 5. 고른 테이크를 **Save**하면 `/Game/Kimodo`(또는 지정한 폴더)에 `AnimSequence`가 생깁니다.
 
 > 생성 시간 예시(RTX 5060 8 GB, 기본 설정): 처음 보는 프롬프트 약 40초, 같은 프롬프트로 시드·길이만 바꾸면 약 17초.
+
+---
+
+## 프롬프트 작성 요령
+
+Kimodo 공식 문서를 이 플러그인 기준으로 요약했습니다. 원문과 다르게 읽히는 부분이 있으면 원문을 따르세요.
+
+> **출처**: NVIDIA, *Kimodo Documentation* — [Best Practices](https://research.nvidia.com/labs/sil/projects/kimodo/docs/key_concepts/limitations.html) (프롬프트 작성, 학습 데이터 범위, 최대 길이) · [Quick Start](https://research.nvidia.com/labs/sil/projects/kimodo/docs/getting_started/quick_start.html) (모델 종류, RP 모델 권장). 2026-11-24 확인.
+
+**문장 형태**
+
+- **`A person ...`으로 시작**합니다. 예: `A person walks forward four steps.`
+  - 꾸밈말로 스타일을 줄 수 있습니다: `An old person ...`, `A drunk person ...`, `A tired person ...`
+- **동작은 한두 개**만 넣습니다. 여러 동작이 이어지는 장면은 테이크를 나눠 만듭니다.
+- **적당히 구체적으로** 씁니다.
+  - `A person walks.`처럼 너무 짧으면 결과가 막연합니다.
+  - 신체 부위를 하나하나 지시하는 긴 문장은 모델이 따라가지 못합니다.
+  - 어느 정도로 쓰는지는 학습 데이터 [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed)의 프롬프트를 참고하면 좋습니다.
+- 각 프롬프트는 **그 자체로 뜻이 통해야** 합니다. `Then the person stops`처럼 앞 동작을 전제한 문장은 잘 안 됩니다. 대신 `A person walking while carrying a box comes to a stop.`처럼 씁니다.
+
+**잘 되는 동작 / 안 되는 동작**
+
+| 잘 되는 분야(학습 데이터에 있음) | 잘 안 되는 예 |
+|---|---|
+| 이동(걷기, 뛰기, 점프), 제스처, 일상 동작, 흔한 물건 다루기, 게임식 전투, 춤 | 학습 데이터에 없는 동작(예: 야구 스윙 같은 특정 스포츠 기술) |
+| 감정·상태 스타일: tired, angry, happy, sad, scared, drunk, injured, stealthy, old, childlike | 여러 동작을 한 문장에 몰아넣은 프롬프트 |
+
+**길이와 시드**
+
+- **Duration은 10초 이하**로 둡니다. Kimodo가 한 프롬프트로 만드는 최대 길이가 10초입니다(패널은 더 긴 값도 받지만 품질을 보장하지 않습니다).
+- 같은 프롬프트라도 시드마다 결과가 다릅니다. 여러 번 생성해 **Takes**에서 고르고, 마음에 드는 시드는 `Use selected`로 고정한 뒤 **Revise**로 다듬습니다.
+
+**Revise 팁**
+
+- 수정 요청은 짧은 영어 문장으로 씁니다. 예: `Jump higher`, `Land in a deeper crouch`
+- 프롬프트 해석(`Interpret Agents`)을 설정하면 원래 프롬프트와 수정 요청을 합쳐 한 문장으로 다시 씁니다. 설정이 없으면 두 문장을 이어 붙여 보냅니다.
 
 ---
 
@@ -290,7 +327,7 @@ Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차
 |---|---|
 | `This Hugging Face token cannot download Llama 3` | Llama 3 라이선스 승인이 끝났는지, 토큰이 같은 계정의 **Read** 토큰인지 확인 |
 | `Access to <repo> was denied` | 해당 Hugging Face 페이지에서 라이선스를 승인 |
-| 설치가 “building from source”로 넘어가고 실패 `Wheels/*.whl`이 약 28 MB인지 확인. 작다면 Releases의 `KimodoAnimation-<버전>.zip`을 다시 받거나, 프로젝트를 클론했다면 `git lfs pull`. 소스 빌드에는 Visual Studio C++, CMake, Git이 필요 |
+| 설치가 “building from source”로 넘어가고 실패 | `Wheels/*.whl`이 약 28 MB인지 확인. 작다면 Releases의 `KimodoAnimation-<버전>.zip`을 다시 받거나, 프로젝트를 클론했다면 `git lfs pull`. 소스 빌드에는 Visual Studio C++, CMake, Git이 필요 |
 | `Write the Kimodo prompt in English.` | 영어로 쓰거나 `Interpret Agents`를 설정 |
 | `Kimodo is not installed on this computer` | 패널에서 Install Kimodo 실행. 경로를 바꿨다면 Local 설정의 Python/모델 캐시 경로 확인 |
 | `Unreal could not characterize <mesh>` | 표준 휴머노이드가 아닌 메시. Target IK Rig(리타게팅 체인 포함)를 직접 지정 |
@@ -307,7 +344,17 @@ Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차
 - **Windows 64-bit, UE 5.8** 전용 에디터 플러그인입니다. 런타임(패키징된 게임)에는 포함되지 않습니다.
 - 생성은 **사람 형태(휴머노이드) 동작**만 다룹니다. 손가락은 대략적인 수준입니다.
 - 한 번에 한 작업만 실행됩니다(생성 중에는 다른 테이크 선택·저장 불가, Cancel 가능).
-- 프롬프트는 짧고 구체적일수록 잘 따릅니다(예: “Jump forward twice” > 긴 문장).
+
+Kimodo 모델 자체의 한계:
+
+> **출처**: NVIDIA, *Kimodo Documentation* — [Best Practices](https://research.nvidia.com/labs/sil/projects/kimodo/docs/key_concepts/limitations.html)의 Limitations 항목, [Quick Start](https://research.nvidia.com/labs/sil/projects/kimodo/docs/getting_started/quick_start.html)의 모델 표. 2026-11-24 확인. 후처리·제약·모델 호환 관련 문장 중 이 플러그인의 동작 설명은 플러그인 코드 기준입니다.
+
+- **길이**: 한 프롬프트로 만드는 동작은 **최대 10초**입니다.
+- **복잡한 프롬프트**: 한 문장에 동작이 많을수록 의도가 흐려집니다. [프롬프트 작성 요령](#프롬프트-작성-요령)을 참고하세요.
+- **학습 범위 밖의 동작**: 학습 데이터에 없는 동작(특정 스포츠 기술 등)은 품질이 크게 떨어집니다.
+- **발 미끄러짐**: 모델 원본 출력에는 발이 바닥에서 미끄러지는 현상(foot skating)이 남을 수 있습니다. 이 플러그인은 Kimodo 후처리를 끄고(`--no-postprocess`) 생성합니다.
+- **이어 붙이기**: Kimodo의 키프레임·경로 제약과 여러 프롬프트 타임라인 기능은 이 패널에서 지원하지 않습니다. 긴 장면은 테이크를 따로 만들어 시퀀서나 몽타주에서 블렌딩합니다.
+- **모델**: `Model Name`에는 SOMA 스켈레톤 모델(`Kimodo-SOMA-RP-v1.2` 기본, RP 계열 권장)만 씁니다. G1(로봇), SMPL-X 모델은 리타게팅 경로가 SOMA 기준이라 맞지 않습니다.
 
 ---
 
@@ -324,3 +371,13 @@ Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차
 - 플러그인 코드(`Source/`, `Scripts/`): [MIT](LICENSE) © 2026 Garagekeeper
 - 동봉한 `kimodo` 휠: Apache-2.0 ([ThirdParty/kimodo/LICENSE](ThirdParty/kimodo/LICENSE))
 - 설치 때 내려받는 Llama 3, LLM2Vec, Kimodo 모델은 각 배포처의 라이선스를 따르며, 사용자가 직접 승인하고 받습니다. 생성한 애니메이션의 사용도 그 조건을 따릅니다. 자세한 내용은 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 보세요.
+
+### 참고 자료
+
+- Kimodo 저장소: https://github.com/nv-tlabs/kimodo
+- Kimodo 문서 — Quick Start: https://research.nvidia.com/labs/sil/projects/kimodo/docs/getting_started/quick_start.html
+- Kimodo 문서 — Best Practices / Limitations: https://research.nvidia.com/labs/sil/projects/kimodo/docs/key_concepts/limitations.html
+- Kimodo 기술 보고서(PDF): https://research.nvidia.com/labs/sil/projects/kimodo/assets/kimodo_tech_report.pdf
+- BONES-SEED 데이터셋: https://huggingface.co/datasets/bones-studio/seed
+
+이 README의 [프롬프트 작성 요령](#프롬프트-작성-요령)과 [제한 사항](#제한-사항) 일부는 위 Kimodo 문서를 요약한 것입니다.
