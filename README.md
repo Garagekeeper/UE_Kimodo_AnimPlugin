@@ -56,34 +56,30 @@ Save → /Game/... 의 AnimSequence
 
 ## 설치
 
-### 방법 A. Git Submodule (권장, `main` 추적)
+### 다운로드해서 넣기
 
-프로젝트 저장소 루트에서:
+1. [Releases](https://github.com/Garagekeeper/UE_Kimodo_AnimPlugin/releases)에서 최신 **`KimodoAnimation-<버전>.zip`**을 받습니다.
+2. 압축을 `<프로젝트>/Plugins/`에 풉니다(`Plugins` 폴더가 없으면 만듭니다). zip 안의 `KimodoAnimation` 폴더가 그대로 생기고, 그 바로 아래에 `KimodoAnimation.uplugin`이 있어야 합니다.
 
-```powershell
-git submodule add -b main https://github.com/Garagekeeper/UE_Kimodo_AnimPlugin.git Plugins/KimodoAnimation
-git lfs pull
+```
+<프로젝트>/
+  Plugins/
+    KimodoAnimation/
+      KimodoAnimation.uplugin
+      Scripts/  Source/  Wheels/ ...
 ```
 
-- 휠 파일은 **Git LFS**로 관리됩니다. `git lfs pull`을 빠뜨리면 휠 대신 작은 포인터 파일만 받아져, 설치가 소스 빌드로 넘어갑니다([문제 해결](#문제-해결) 참고).
-- 특정 버전에 고정하려면 서브모듈 안에서 태그를 체크아웃합니다: `git -C Plugins/KimodoAnimation checkout v1.0.0`
+3. 프로젝트를 Git으로 관리한다면 이 폴더를 그대로 커밋합니다. 휠(`Wheels/*.whl`, 약 28 MB)은 플러그인에 들어 있는 `.gitattributes` 때문에 Git LFS로 올라갑니다(프로젝트에 Git LFS 설치 필요).
 
-업데이트:
+> **주의**: GitHub의 `Code > Download ZIP`이나 태그의 `Source code (zip)`은 Git LFS 파일을 포함하지 않아, 휠 대신 작은 텍스트 파일이 들어 있습니다. 반드시 Releases에 첨부된 `KimodoAnimation-<버전>.zip`을 받으세요. `Wheels/*.whl`이 약 28 MB인지로 확인할 수 있습니다.
 
-```powershell
-git submodule update --remote Plugins/KimodoAnimation
-```
+### 업데이트
 
-다른 PC에서 처음 클론할 때:
+1. 에디터를 닫습니다.
+2. 기존 `Plugins/KimodoAnimation/` 폴더를 지우고, 새 버전 zip을 같은 위치에 풉니다(덮어쓰기만 하면 지워진 파일이 남을 수 있음).
+3. 프로젝트를 열면 플러그인 C++ 모듈을 다시 빌드합니다. 테이크 캐시, 설정, 설치한 Kimodo(`%LOCALAPPDATA%\KimodoAnimation\`)는 그대로 유지됩니다.
 
-```powershell
-git clone --recurse-submodules <프로젝트 저장소 URL>
-git lfs pull
-```
-
-### 방법 B. 폴더 복사
-
-이 저장소(또는 릴리스 압축 파일)를 `<프로젝트>/Plugins/KimodoAnimation/`에 넣습니다. `Wheels/*.whl`이 실제 파일(약 28 MB)인지 확인하세요.
+변경 내용은 [CHANGELOG.md](CHANGELOG.md)에서 확인합니다.
 
 ### 빌드와 활성화
 
@@ -286,7 +282,7 @@ Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차
 |---|---|
 | `This Hugging Face token cannot download Llama 3` | Llama 3 라이선스 승인이 끝났는지, 토큰이 같은 계정의 **Read** 토큰인지 확인 |
 | `Access to <repo> was denied` | 해당 Hugging Face 페이지에서 라이선스를 승인 |
-| 설치가 “building from source”로 넘어가고 실패 | `git lfs pull`로 휠을 받았는지 확인(`Wheels/*.whl`이 약 28 MB여야 함). 소스 빌드에는 Visual Studio C++, CMake, Git이 필요 |
+| 설치가 “building from source”로 넘어가고 실패 `Wheels/*.whl`이 약 28 MB인지 확인. 작다면 Releases의 `KimodoAnimation-<버전>.zip`을 다시 받거나, 프로젝트를 클론했다면 `git lfs pull`. 소스 빌드에는 Visual Studio C++, CMake, Git이 필요 |
 | `Write the Kimodo prompt in English.` | 영어로 쓰거나 `Interpret Agents`를 설정 |
 | `Kimodo is not installed on this computer` | 패널에서 Install Kimodo 실행. 경로를 바꿨다면 Local 설정의 Python/모델 캐시 경로 확인 |
 | `Unreal could not characterize <mesh>` | 표준 휴머노이드가 아닌 메시. Target IK Rig(리타게팅 체인 포함)를 직접 지정 |
