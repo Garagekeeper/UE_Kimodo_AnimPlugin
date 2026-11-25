@@ -346,6 +346,16 @@ Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차
 | `<프로젝트>/Saved/Kimodo/TakeAssets/` | 테이크 미리보기 캐시(`/KimodoTakes/Preview`) |
 | `<프로젝트>/Saved/Kimodo/session_takes.json` | 테이크 목록 |
 | 저장 폴더(`/Game/Kimodo` 등) | Save로 만든 `AnimSequence` |
+| `<작업 폴더>/KimodoWorker.log` | 메모리에 띄워 둔 Kimodo 프로세스의 로그 |
+
+### 개발: 자동 테스트
+
+플러그인을 고칠 때는 [`Tests/`](Tests/README.md)의 테스트로 회귀를 확인합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Tests\run_tests.ps1          # 단위 테스트(약 1초, Unreal·Kimodo 불필요)
+powershell -ExecutionPolicy Bypass -File Tests\run_tests.ps1 -All     # 단위 + Kimodo 통합 + 헤드리스 에디터(약 10분)
+```
 
 ---
 
