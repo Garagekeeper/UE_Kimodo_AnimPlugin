@@ -3,7 +3,7 @@
 텍스트 프롬프트 한 줄로 동작을 만들어, 내 프로젝트의 스켈레탈 메시에 맞는 `AnimSequence`로 저장하는 **에디터 전용** 플러그인입니다.
 NVIDIA의 모션 생성 모델 [Kimodo](https://github.com/nv-tlabs/kimodo)를 **내 PC에서 로컬로** 실행하며, 생성·리타게팅·미리보기·저장을 UE 에디터 패널 하나에서 처리합니다.
 
-버전 **1.0.0** · 변경 내역은 [CHANGELOG.md](CHANGELOG.md) · 라이선스 [MIT](LICENSE)
+버전 **1.1.0** · 변경 내역은 [CHANGELOG.md](CHANGELOG.md) · 라이선스 [MIT](LICENSE)
 
 ![Kimodo Animation 패널: 왼쪽 미리보기, 오른쪽 위 Target · Takes · Save, 오른쪽 아래 Prompt와 Generate](Resources/Readme/panel.png)
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 — 2026-11-25
 
 ### Added
 - **Generate ×N**: a `×1 / ×3 / ×5 / ×10` selector right next to the Generate button makes several takes from one prompt in a row. The prompt is interpreted once; each take gets its own seed (random, or `seed, seed+1, …` when a seed is entered). Progress shows `Take 2/5`; Cancel keeps the takes already made. Revise always makes one take.
