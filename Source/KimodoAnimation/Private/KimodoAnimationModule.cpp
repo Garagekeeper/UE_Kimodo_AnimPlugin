@@ -713,7 +713,7 @@ private:
 					SNew(SButton)
 					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 					.ContentPadding(FMargin(2))
-					.ToolTipText(LOCTEXT("StarTip", "Star to keep this take in the list. Beyond 20 takes, the oldest unstarred ones are removed."))
+					.ToolTipText(LOCTEXT("StarTip", "Star to keep this take in the list. Starred takes are kept and do not count toward the limit; beyond 20 unstarred takes, the oldest unstarred ones are removed."))
 					.OnClicked_Lambda([this, Id] { return RunAction(TEXT("star"), Id); })
 					[
 						SNew(SImage)

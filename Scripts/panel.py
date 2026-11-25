@@ -17,7 +17,8 @@ import unreal as u
 
 SCRIPTS = Path(__file__).resolve().parent
 KEPT_JOBS = 20
-# 테이크 목록 최대 길이. 넘으면 별표 없는 가장 오래된 테이크부터 목록에서 뺀다.
+# 별표 없는 테이크를 이만큼만 남긴다. 넘으면 별표 없는 가장 오래된 테이크부터 목록에서 뺀다.
+# 별표 테이크는 이 개수에 세지 않고 몇 개든 남긴다.
 MAX_TAKES = 20
 # 메모리에 올려 둘 프리뷰 수. 테이크 결과는 Saved/Kimodo/TakeAssets에 에셋 파일로 남겨 두므로
 # 다시 불러오는 데 수십 ms면 된다. 캐시가 없는 예전 테이크만 고를 때 glTF를 다시 가져온다.
@@ -625,7 +626,8 @@ class Panel:
         take["target"] = target.get_name()
 
     def prune_takes(self):
-        while len(self.takes) > MAX_TAKES:
+        # 별표 테이크는 세지 않는다: 별표 없는 테이크가 MAX_TAKES개를 넘을 때만 그중 가장 오래된 것을 뺀다.
+        while sum(1 for t in self.takes if not t["starred"]) > MAX_TAKES:
             victim = next((t for t in self.takes if not t["starred"] and t["id"] != self.selected), None)
             if victim is None:
                 return
@@ -828,7 +830,7 @@ class Panel:
         self.takes.sort(key=lambda t: t["number"])
 
         self.prune_takes()
-        # 클릭할 때 끊기지 않도록 Restore에서 전부 불러온다(최대 MAX_TAKES개 모두 메모리에 유지).
+        # 클릭할 때 끊기지 않도록 Restore에서 전부 불러온다(별표 없는 MAX_TAKES개 + 별표 테이크 모두).
         # 캐시한 테이크는 파일을 여는 것뿐이고, 캐시가 없는 예전 테이크만 여기서 한 번 리타게팅해 캐시로 만든다.
         failed = 0
         for take in [t for t in restored if t in self.takes]:

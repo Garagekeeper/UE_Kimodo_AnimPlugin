@@ -80,6 +80,21 @@ class TakeNumbering(unittest.TestCase):
         self.assertEqual(p.takes[-1]["number"], 21)
 
 
+class TakeLimit(unittest.TestCase):
+    def test_starred_takes_do_not_count_toward_the_limit(self):
+        p = new_panel()
+        starred = [p.add_take(MagicMock(), f"s{i}", prompt=f"star {i}", duration=1.0) for i in range(5)]
+        for take in starred:
+            p.toggle_star(take["id"])
+        for i in range(panel.MAX_TAKES + 1):
+            p.add_take(MagicMock(), f"u{i}", prompt=f"plain {i}", duration=1.0)
+        unstarred = [t for t in p.takes if not t["starred"]]
+        self.assertEqual(len(unstarred), panel.MAX_TAKES)
+        self.assertTrue(all(t in p.takes for t in starred), "every starred take is kept")
+        self.assertEqual(unstarred[0]["prompt"], "plain 1", "the oldest unstarred take was removed")
+        self.assertEqual(len(p.takes), panel.MAX_TAKES + 5)
+
+
 class RemoveTake(unittest.TestCase):
     def test_status_line_after_removing_takes(self):
         p = new_panel()

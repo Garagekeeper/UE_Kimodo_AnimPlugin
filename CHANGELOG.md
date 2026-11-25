@@ -7,6 +7,7 @@
 - Automated tests in `Tests/` (unit, Kimodo worker integration, headless editor) with `Tests/run_tests.ps1`.
 
 ### Fixes
+- Starred takes no longer count toward the 20-take limit: up to 20 unstarred takes are kept, plus every starred take.
 - The progress line says what it is waiting for: `Starting Kimodo` / `Loading Kimodo model` (first take only), `Loading text encoder` and `Encoding new prompt (about 30-40 s, cached after)` (new prompts only), `Preparing generation`, `Generating motion N%`. It no longer shows `Loading Kimodo` at the start of every take once Kimodo is resident, and `Finishing the cancelled take` appears only after a Cancel.
 
 ## 1.1.0 — 2026-11-25
