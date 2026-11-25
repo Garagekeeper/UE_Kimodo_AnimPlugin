@@ -32,6 +32,8 @@ TEXT_ENCODER_DEVICES = ("stream", "stream-exact", "cpu", "cuda", "auto")
 MAX_BATCH = 10
 # 상주 Kimodo 워커를 이 시간(초) 동안 쓰지 않으면 내려 VRAM·RAM을 돌려준다.
 WORKER_IDLE_SECONDS = 600
+# 테이크가 없을 때 상태 줄 안내.
+IDLE_MESSAGE = "Choose a target mesh, then enter a motion prompt and duration."
 # 터미널 색상·커서 코드(ESC[...m 등)와 줄바꿈 외 제어 문자. Slate 글꼴에 글리프가 없어 매 프레임 경고가 난다.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
 CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
@@ -475,7 +477,7 @@ class Panel:
         self.interpretation = ""
         # Kimodo에 실제로 전달한 영어 프롬프트
         self.english_prompt = ""
-        self.message = "Choose a target mesh, then enter a motion prompt and duration."
+        self.message = IDLE_MESSAGE
         self.restored = False
         # 다시 가져와야 하는 직전 미리보기(glTF). 에디터 시작을 막지 않도록 버튼을 눌렀을 때만 복원한다.
         self.restorable = None
@@ -623,6 +625,14 @@ class Panel:
             fallback = max(loaded, key=lambda t: t["used"]) if loaded else None
             self.selected = fallback["id"] if fallback else None
             self.apply_selected()
+        # 지운 테이크의 안내(Take #6 · …)가 상태 줄에 남지 않도록, 지금 고른 테이크 기준으로 다시 쓴다.
+        current = self.selected_take()
+        if current is not None:
+            self.message = f"Take #{current['number']} · {current['duration']:.2f}s · seed {current['seed']}"
+        elif not self.takes:
+            self.message = IDLE_MESSAGE
+        else:
+            self.message = f"Removed take #{take['number']}"
 
     def select_take(self, take_id, config):
         take = self.find_take(take_id)

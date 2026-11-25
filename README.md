@@ -5,7 +5,7 @@ NVIDIA의 모션 생성 모델 [Kimodo](https://github.com/nv-tlabs/kimodo)를 *
 
 버전 **1.0.0** · 변경 내역은 [CHANGELOG.md](CHANGELOG.md) · 라이선스 [MIT](LICENSE)
 
-![Kimodo Animation 패널: 왼쪽 미리보기, 오른쪽 Target · Prompt · Takes · Save](Resources/Readme/panel.png)
+![Kimodo Animation 패널: 왼쪽 미리보기, 오른쪽 위 Target · Takes · Save, 오른쪽 아래 Prompt와 Generate](Resources/Readme/panel.png)
 
 ```
 "Walk forward four steps"
@@ -97,6 +97,8 @@ Save → /Game/... 의 AnimSequence
 
 패널을 처음 열면 **Install Kimodo** 영역이 보입니다. Kimodo가 설치되어 있으면 이 영역은 숨겨집니다.
 
+![Kimodo 설치 전 패널: 안내, Llama 3 라이선스 링크, 토큰 입력칸과 Install Kimodo 버튼](Resources/Readme/install.png)
+
 1. Hugging Face에서 [Llama 3 8B Instruct 라이선스를 승인](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)합니다(승인까지 시간이 걸릴 수 있음).
 2. [Hugging Face 설정 > Access Tokens](https://huggingface.co/settings/tokens)에서 **Read** 토큰을 만듭니다.
 3. 패널의 토큰 칸에 붙여 넣고 **Install Kimodo**를 누릅니다.
@@ -118,8 +120,6 @@ Save → /Game/... 의 AnimSequence
 ---
 
 ## 빠른 시작
-
-![처음 연 패널: 대상 메시를 고르고 프롬프트를 적은 뒤 Generate](Resources/Readme/panel-empty.png)
 
 1. **Target**에서 대상 스켈레탈 메시를 고릅니다(예: `SKM_Manny_Simple`). IK Rig와 Retargeter는 비워 두면 자동입니다.
 2. **Prompt**에 영어로 동작을 적습니다. 예: `Wave the right hand`, `Walk forward four steps`
@@ -184,12 +184,16 @@ Kimodo 공식 문서를 이 플러그인 기준으로 요약했습니다. 원문
 
 ### Target
 
+![Target: 대상 메시, IK Rig, Retargeter](Resources/Readme/target.png)
+
 - **Skeletal Mesh**(필수), **IK Rig**(선택), **Retargeter**(선택)를 썸네일과 함께 한 줄에 고릅니다.
 - IK Rig를 비우면 같은 스켈레톤의 IK Rig를 찾고, 없으면 UE 자동 캐릭터화로 만듭니다.
 - Retargeter를 지정하면 자동 체인 매핑 대신 그 에셋의 설정(루트 모션 포함)을 그대로 씁니다.
 - 마지막으로 고른 값은 다음에 패널을 열 때 유지됩니다.
 
 ### Prompt (오른쪽 아래)
+
+![Prompt 입력, Duration, 펼친 Advanced, ×N 선택과 Generate](Resources/Readme/prompt.png)
 
 - **동작 설명**(영어). 빈 칸에서 `Tab`을 누르면 예시 문장이 들어갑니다. 길게 쓰면 입력칸 안에서 스크롤됩니다.
   - 한국어로 쓰려면 [프롬프트 해석](#설정-항목)(InterpretAgents)을 설정해야 합니다. 설정이 없으면 영어만 받습니다.
@@ -198,12 +202,17 @@ Kimodo 공식 문서를 이 플러그인 기준으로 요약했습니다. 원문
   - 해석은 한 번만 하고, 두 번째부터는 임베딩 캐시와 메모리에 남은 모델을 써서 테이크당 약 4초(RTX 5060, 2초 클립 기준)가 걸립니다.
   - Seed를 비우면 테이크마다 무작위, 넣으면 `seed, seed+1, …`을 씁니다.
   - 진행 중에는 `Take 2/5`처럼 표시되고, Cancel하면 이미 만든 테이크는 남습니다. Revise는 항상 1개입니다.
+
+  ![×10 생성 중: 상태 줄에 Take 5/10, 만들어진 테이크가 위 목록에 차례로 쌓임](Resources/Readme/batch.png)
+
 - **Advanced**(기본은 접힘, 펼친 상태는 다음에 패널을 열 때도 유지):
   - **Seed**: 비우면 무작위. 숫자를 넣으면 같은 결과를 재현. `Use selected`는 고른 테이크의 시드를, `Clear`는 비우기
   - **Root motion**: [루트 모션](#루트-모션) 참고
   - **Text encoder**: [텍스트 인코더와 메모리](#텍스트-인코더와-메모리) 참고
 
 ### Takes
+
+![Takes 목록과 펼친 Input prompt, Revise 칸](Resources/Readme/takes.png)
 
 - 생성할 때마다 한 줄씩 쌓입니다(최대 **20개**). 각 줄: ☆ 별표, 번호, 프롬프트, 시드·길이, 저장 여부 ✓, ✕ 삭제
 - **클릭**: 미리보기 전환(바로 바뀜, 다시 리타게팅하지 않음)
@@ -213,7 +222,11 @@ Kimodo 공식 문서를 이 플러그인 기준으로 요약했습니다. 원문
 - **Revise**(수정 칸에서 `Enter`): 고른 테이크를 기준으로 “조금 더 높이 점프” 같은 수정 요청을 덧붙여 다시 생성. 시드는 유지됩니다.
   - 버튼(`Revise #7`)과 수정 칸 안내문(`Revise #7 (seed 1234), …`)에 기준 테이크가 표시됩니다. 테이크를 고르지 않았으면 수정 칸이 꺼져 있습니다.
 
+  ![#13을 기준으로 수정 요청 입력: Land in a deeper crouch → Revise #13](Resources/Readme/revise.png)
+
 ### Save
+
+![Save: 이름 자동 제안, 저장 폴더](Resources/Readme/save.png)
 
 - **Name**: 프롬프트와 시드로 자동 제안(`AS_Kimodo_WaveRightHand_s11`, 이미 있으면 `_2`). 직접 고치면 덮어쓰지 않습니다.
 - **Folder**: `Browse`로 콘텐츠 폴더 선택, `Default`는 프로젝트 설정의 출력 폴더. 마지막으로 저장한 폴더를 기억합니다.
@@ -241,7 +254,7 @@ Kimodo는 이동(앞으로 걷기, 점프해서 나아가기 등)을 모두 **pe
 | **끔**(기본) | root 고정, 이동은 pelvis에 남음 | 제자리 루프(걷기 사이클 등), 블렌드 스페이스 |
 | **켬** | pelvis의 수평 이동으로 root 이동을 만들고 바닥 높이에 붙임. 시퀀스의 `Enable Root Motion`도 켬 | 캐릭터를 실제로 이동시키는 동작(몽타주, 루트 모션 기반 이동) |
 
-![Root motion을 켠 테이크: 바닥에 루트 경로(노란 선, 시작 초록 + / 끝 빨강 +)가 그려짐](Resources/Readme/root-motion.png)
+![Root motion을 켜고 만든 테이크: Advanced의 Root motion 체크, 바닥에 루트 경로(노란 선, 시작 초록 + / 끝 빨강 +)](Resources/Readme/root-motion.png)
 
 - 켜고 만든 테이크는 상태 줄에 `· root motion`이 붙고, 미리보기에서 캐릭터가 이동하며 경로가 그려집니다.
 - 설정은 **새로 만드는 테이크**에 적용됩니다. 이미 만든 테이크는 바뀌지 않습니다.
@@ -267,13 +280,15 @@ Kimodo는 이동(앞으로 걷기, 점프해서 나아가기 등)을 모두 **pe
 Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차원 벡터로 바꿉니다. 모델 전체가 약 16 GB라, 그대로 올리면 일반 PC에서는 메모리가 부족합니다.
 이 플러그인은 기본으로 **층을 하나씩 디스크에서 읽어 계산하는 방식**을 씁니다.
 
-| Text encoder | 최대 RAM | 생성 1회 | 결과 |
+![Advanced > Text encoder 메뉴와 설명 툴팁](Resources/Readme/text-encoder.png)
+
+| Text encoder (패널 메뉴 이름) | 최대 RAM | 생성 1회 | 결과 |
 |---|---|---|---|
-| **Low memory (streaming)** (기본) | 약 2.6 GB | 약 42초 | 원래 방식 대비 관절 위치 평균 약 0.5 cm(최대 약 2 cm) 차이 |
+| **Low memory (fast)** (기본) | 약 2.6 GB | 약 42초 | 원래 방식 대비 관절 위치 평균 약 0.5 cm(최대 약 2 cm) 차이 |
 | **Low memory (exact)** | 약 2.8 GB | 약 40초 | 원래 CPU 방식과 비트 단위로 동일 |
-| CPU | 약 15.6 GB | 약 56초 | 기준 |
-| CUDA | VRAM 16 GB 이상 필요 | GPU에 따라 다름 | VRAM이 부족하면 매우 느려지거나 실패 |
-| Auto | CUDA를 쓸 수 있으면 GPU, 아니면 CPU | | VRAM 크기는 확인하지 않음 |
+| Full model on CPU | 약 15.6 GB | 약 56초 | 기준 |
+| Full model on GPU | VRAM 16 GB 이상 필요 | GPU에 따라 다름 | VRAM이 부족하면 매우 느려지거나 실패 |
+| Full model, GPU if available | CUDA를 쓸 수 있으면 GPU, 아니면 CPU | | VRAM 크기는 확인하지 않음 |
 
 측정: RTX 5060 8 GB, RAM 31 GB, NVMe SSD, 2초 클립 생성 전체 시간(프로세스 최대 메모리).
 

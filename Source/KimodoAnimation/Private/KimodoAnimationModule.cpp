@@ -512,6 +512,8 @@ private:
 				SNew(SExpandableArea)
 				.AreaTitle(LOCTEXT("Advanced", "Advanced"))
 				.InitiallyCollapsed(!GetDefault<UKimodoUserSettings>()->bAdvancedExpanded)
+				// 접는 애니메이션 동안 하위 항목(시드·루트 모션)이 잘리지 않고 비쳐 보여 어색하므로 바로 접고 편다.
+				.AllowAnimatedTransition(false)
 				.OnAreaExpansionChanged_Lambda([](bool bExpanded) {
 					UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
 					UserSettings->bAdvancedExpanded = bExpanded;
@@ -926,6 +928,8 @@ private:
 						SNew(SSegmentedControl<int32>)
 						.ToolTipText(LOCTEXT("BatchTip", "How many takes Generate makes from this prompt, one after another with different seeds.\nWith a seed entered, they use seed, seed+1, … Revise always makes one take."))
 						.IsEnabled_Lambda([this] { return !bBusy; })
+						// 설치 전에는 프롬프트 입력처럼 숨긴다(생성할 수 없으므로).
+						.Visibility_Lambda([this] { return !bNeedsInitialState && IsReady() ? EVisibility::Visible : EVisibility::Collapsed; })
 						.Value_Lambda([] { return GetBatchCount(); })
 						.OnValueChanged_Lambda([](int32 Value) {
 							UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
