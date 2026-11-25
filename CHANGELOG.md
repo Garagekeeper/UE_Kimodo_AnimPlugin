@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 — 2026-11-25
 
 ### Added
 - Prebuilt download `KimodoAnimation-<version>-Win64-UE5.8.zip` with the compiled editor DLL, so Blueprint-only projects can use the plugin without Visual Studio (first published for 1.1.0, verified on a separate PC). The source zip stays for C++ projects and other engine hotfixes.

@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "1.1.0",
+	"Version": 4,
+	"VersionName": "1.1.1",
 	"FriendlyName": "Kimodo Animation",
 	"Description": "Generate an AnimSequence for any skeletal mesh from a text motion prompt with a local Kimodo installation. The editor panel previews the retargeted clip and saves it to the project. Editor only.",
 	"Category": "Animation",
