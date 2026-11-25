@@ -205,13 +205,18 @@ class ResidentWorker(unittest.TestCase):
         folder = Path(tempfile.mkdtemp())
         p.job.update(stage="Kimodo", folder=folder)
         p.process = panel.WorkerTask(worker, folder / "Kimodo.done.json")
-        self.assertEqual(p.progress()[0], "Starting generation")
+        self.assertEqual(p.progress()[0], panel.STAGE_PREPARING)
         worker.abandoned = Path(tempfile.mkdtemp()) / "old.done.json"  # 취소한 요청이 아직 안 끝남
         self.assertEqual(p.progress()[0], "Finishing the cancelled take")
         worker.abandoned.write_text('{"ok": true}', encoding="utf-8")
-        self.assertEqual(p.progress()[0], "Starting generation")
+        self.assertEqual(p.progress()[0], panel.STAGE_PREPARING)
+        # 워커가 처음 뜨는 중: PyTorch import → 모델 로딩
         worker.loaded = lambda: False
-        self.assertEqual(p.progress()[0], "Loading Kimodo")
+        worker.log_path = Path(tempfile.mkdtemp()) / "KimodoWorker.log"
+        worker.log_path.write_text("FutureWarning: ...\n", encoding="utf-8")
+        self.assertEqual(p.progress()[0], panel.STAGE_STARTING_KIMODO)
+        worker.log_path.write_text("Using device: cuda:0\n", encoding="utf-8")
+        self.assertEqual(p.progress()[0], panel.STAGE_LOADING_MODEL)
 
     def test_cancel_remembers_the_abandoned_request(self):
         p = new_panel()
@@ -266,14 +271,20 @@ class Helpers(unittest.TestCase):
 
     def test_kimodo_progress_stages(self):
         log = Path(tempfile.mkdtemp()) / "Kimodo.log"
-        self.assertEqual(panel.kimodo_progress(log), ("Loading Kimodo", -1.0))
-        log.write_text("Loaded model\nText encoder: low-memory streaming\n", encoding="utf-8")
-        self.assertEqual(panel.kimodo_progress(log)[0], "Encoding prompt")
-        log.write_text("Text encoder: cached embedding\n 37%|###| 37/100 [00:01<00:02]\r 50%|###| 50/100 [", encoding="utf-8")
-        self.assertEqual(panel.kimodo_progress(log), ("Generating motion", 0.5))
-        # 상주 워커 요청은 모델을 불러오지 않으므로 "Loading Kimodo"가 아니어야 한다.
+        self.assertEqual(panel.kimodo_progress(log), (panel.STAGE_LOADING_MODEL, -1.0))
+        log.write_text("Using device: cuda:0\n", encoding="utf-8")
+        self.assertEqual(panel.kimodo_progress(log)[0], panel.STAGE_LOADING_MODEL)
+        # 상주 워커 요청은 모델을 불러오지 않으므로 로딩이 아니라 준비 단계다.
         log.write_text("Using device: cuda:0\nLoaded model: kimodo-soma-rp-v1.2 (resident worker)\n", encoding="utf-8")
-        self.assertEqual(panel.kimodo_progress(log), ("Starting generation", -1.0))
+        self.assertEqual(panel.kimodo_progress(log), (panel.STAGE_PREPARING, -1.0))
+        log.write_text("Loaded model\nText encoder: low-memory streaming on cpu (exact)\n", encoding="utf-8")
+        self.assertEqual(panel.kimodo_progress(log)[0], panel.STAGE_LOADING_ENCODER)
+        log.write_text("Loaded model\nText encoder: low-memory streaming\nText encoder ready in 1.8s\n", encoding="utf-8")
+        self.assertEqual(panel.kimodo_progress(log)[0], panel.STAGE_ENCODING)
+        log.write_text("Text encoder: cached embedding\n 37%|###| 37/100 [00:01<00:02]\r 50%|###| 50/100 [", encoding="utf-8")
+        self.assertEqual(panel.kimodo_progress(log), (panel.STAGE_GENERATING, 0.5))
+        log.write_text("Text encoder ready in 1.8s\nEncoded prompt in 36.9s\n", encoding="utf-8")
+        self.assertEqual(panel.kimodo_progress(log), (panel.STAGE_GENERATING, 0.0))
 
     def test_last_log_line_handles_carriage_returns(self):
         log = Path(tempfile.mkdtemp()) / "x.log"

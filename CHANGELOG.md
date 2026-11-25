@@ -7,7 +7,7 @@
 - Automated tests in `Tests/` (unit, Kimodo worker integration, headless editor) with `Tests/run_tests.ps1`.
 
 ### Fixes
-- The progress line no longer shows `Loading Kimodo` at the start of every take once Kimodo is resident (it shows `Starting generation`), and `Finishing the cancelled take` appears only after a Cancel.
+- The progress line says what it is waiting for: `Starting Kimodo` / `Loading Kimodo model` (first take only), `Loading text encoder` and `Encoding new prompt (about 30-40 s, cached after)` (new prompts only), `Preparing generation`, `Generating motion N%`. It no longer shows `Loading Kimodo` at the start of every take once Kimodo is resident, and `Finishing the cancelled take` appears only after a Cancel.
 
 ## 1.1.0 — 2026-11-25
 

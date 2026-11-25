@@ -399,28 +399,45 @@ def read_tail(path, size=8192):
 TQDM_STEPS = re.compile(r"(\d+)/(\d+) \[")
 
 
-def kimodo_progress(path):
-    """Kimodo 단계 로그에서 (세부 단계 이름, 진행률 0~1 또는 -1)을 읽는다.
+# 진행 표시 단계 이름. 무엇 때문에 기다리는지(처음 한 번인지, 새 프롬프트라서인지) 알 수 있게 쓴다.
+STAGE_STARTING_KIMODO = "Starting Kimodo (first take only)"
+STAGE_LOADING_MODEL = "Loading Kimodo model (first take only)"
+STAGE_LOADING_ENCODER = "Loading text encoder (new prompt)"
+STAGE_ENCODING = "Encoding new prompt (about 30-40 s, cached after)"
+STAGE_PREPARING = "Preparing generation"
+STAGE_GENERATING = "Generating motion"
 
-    kimodo_generate.py는 모델을 불러온 뒤 텍스트 인코더를 처음 쓸 때 'Text encoder:'를,
-    인코딩이 끝나면 'Encoded prompt' 또는 'cached embedding'을 찍고, 그다음 확산 샘플링이 tqdm으로 진행된다."""
+
+def kimodo_progress(path):
+    """요청 하나의 Kimodo 로그(Kimodo.log)에서 (세부 단계 이름, 진행률 0~1 또는 -1)을 읽는다.
+
+    로그 순서: (CLI) 'Using device' → 'Loaded model' / (상주 워커) 'Loaded model: … (resident worker)'
+    → 새 프롬프트면 'Text encoder: …' → 'Text encoder ready' → 'Encoded prompt', 캐시면 'Text encoder: cached embedding'
+    → 확산 샘플링 tqdm(N/100)."""
     try:
         with open(path, "rb") as log:
             text = log.read().decode("utf-8", errors="replace")
     except OSError:
-        return "Loading Kimodo", -1.0
+        return STAGE_LOADING_MODEL, -1.0
     steps = TQDM_STEPS.findall(text[-8192:])
     if "Encoded prompt" in text or "cached embedding" in text:
         if steps:
             done, total = (int(v) for v in steps[-1])
-            return "Generating motion", (done / total if total else -1.0)
-        return "Generating motion", 0.0
+            return STAGE_GENERATING, (done / total if total else -1.0)
+        return STAGE_GENERATING, 0.0
+    if "Text encoder ready" in text:
+        return STAGE_ENCODING, -1.0
     if "Text encoder:" in text:
-        return "Encoding prompt", -1.0
-    # 상주 워커는 모델이 이미 메모리에 있어 로딩하지 않는다. 인코더를 부르기 전 잠깐의 준비 구간이다.
-    if "(resident worker)" in text:
-        return "Starting generation", -1.0
-    return "Loading Kimodo", -1.0
+        return STAGE_LOADING_ENCODER, -1.0
+    # 모델은 이미 올라와 있고(상주 워커 또는 CLI가 로딩을 마침) 인코더를 부르기 직전이다.
+    if "Loaded model" in text:
+        return STAGE_PREPARING, -1.0
+    return STAGE_LOADING_MODEL, -1.0
+
+
+def worker_startup_stage(path):
+    """상주 워커가 처음 뜰 때의 단계: PyTorch import 중이면 시작, 'Using device' 뒤에는 모델 로딩."""
+    return STAGE_LOADING_MODEL if "Using device" in read_tail(path, 65536) else STAGE_STARTING_KIMODO
 
 
 NAME_STOP_WORDS = {
@@ -1203,14 +1220,14 @@ class Panel:
         if stage == "Kimodo":
             if not (folder / "Kimodo.log").is_file() and self.worker is not None:
                 if not self.worker.loaded():
-                    # 워커가 아직 모델을 불러오는 중(처음 생성할 때만). 워커 로그의 마지막 줄을 보여 준다.
-                    return "Loading Kimodo", -1.0, last_log_line(self.worker.log_path)
+                    # 워커가 아직 뜨는 중(처음 생성할 때만). 워커 로그의 마지막 줄을 보여 준다.
+                    return worker_startup_stage(self.worker.log_path), -1.0, last_log_line(self.worker.log_path)
                 abandoned = getattr(self.worker, "abandoned", None)
                 if abandoned is not None and not abandoned.is_file():
                     # 취소한 직전 요청을 워커가 마저 끝내는 중. 끝나면 이 요청을 바로 시작한다.
                     return "Finishing the cancelled take", -1.0, ""
                 # 워커가 요청을 막 받아 로그 파일을 열기 직전(보통 1초 미만).
-                return "Starting generation", -1.0, ""
+                return STAGE_PREPARING, -1.0, ""
             label, fraction = kimodo_progress(folder / "Kimodo.log")
             return label, fraction, detail
         if stage == "Conversion":
