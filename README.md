@@ -44,8 +44,8 @@ Save → /Game/... 의 AnimSequence
 
 | 항목 | 내용 |
 |---|---|
-| 엔진 | **Unreal Engine 5.8**, Windows 64-bit. C++ 프로젝트(플러그인 C++ 모듈을 빌드하므로) |
-| 빌드 도구 | Visual Studio(“C++를 사용한 게임 개발” 워크로드)와 Windows SDK |
+| 엔진 | **Unreal Engine 5.8**, Windows 64-bit. Blueprint 프로젝트와 C++ 프로젝트 모두 가능([어떤 zip을 받을지](#어떤-zip을-받을까)) |
+| 빌드 도구 | 빌드된 zip(`-Win64-UE5.8`)을 쓰면 **필요 없음**. 소스 zip은 Visual Studio(“C++를 사용한 게임 개발” 워크로드)와 Windows SDK 필요 |
 | GPU | **NVIDIA GPU 권장**(CUDA 12.8 PyTorch). 없으면 CPU용 PyTorch로 설치되며 생성이 느려집니다 |
 | RAM | 기본 설정(Low memory)에서 생성 중 약 **3 GB** 추가 사용. 16 GB PC에서도 동작 |
 | 디스크 | 약 **20 GB**(PyTorch 약 3 GB + Llama 3 8B 약 16 GB + Kimodo 모델). 기본 위치 `%LOCALAPPDATA%\KimodoAnimation\` |
@@ -59,9 +59,21 @@ Save → /Game/... 의 AnimSequence
 
 ## 설치
 
+### 어떤 zip을 받을까
+
+[Releases](https://github.com/Garagekeeper/UE_Kimodo_AnimPlugin/releases)에는 zip이 두 개 있습니다.
+
+| zip | 들어 있는 것 | 이런 경우에 |
+|---|---|---|
+| **`KimodoAnimation-<버전>-Win64-UE5.8.zip`** (빌드됨) | 미리 컴파일한 플러그인 DLL + 소스 | **Blueprint 프로젝트**, 또는 Visual Studio 없이 쓰고 싶을 때. UE **5.8.0** 전용 |
+| `KimodoAnimation-<버전>.zip` (소스) | 소스만. 프로젝트를 열 때 직접 빌드 | C++ 프로젝트, 다른 5.8.x 핫픽스, 코드를 고쳐 쓸 때 |
+
+- 빌드된 zip은 엔진 버전이 정확히 맞아야 합니다. 프로젝트를 열 때 “모듈을 다시 빌드할까요?” 창이나 “다른 엔진 버전으로 빌드됨” 메시지가 뜨면 소스 zip을 쓰세요(Visual Studio 필요).
+- Blueprint 프로젝트에서 소스 zip을 쓰려면 먼저 `Tools > New C++ Class…`로 빈 클래스를 하나 추가해 C++ 프로젝트로 바꿔야 합니다.
+
 ### 다운로드해서 넣기
 
-1. [Releases](https://github.com/Garagekeeper/UE_Kimodo_AnimPlugin/releases)에서 최신 **`KimodoAnimation-<버전>.zip`**을 받습니다.
+1. 위 표를 보고 zip을 받습니다.
 2. 압축을 `<프로젝트>/Plugins/`에 풉니다(`Plugins` 폴더가 없으면 만듭니다). zip 안의 `KimodoAnimation` 폴더가 그대로 생기고, 그 바로 아래에 `KimodoAnimation.uplugin`이 있어야 합니다.
 
 ```
@@ -69,25 +81,27 @@ Save → /Game/... 의 AnimSequence
   Plugins/
     KimodoAnimation/
       KimodoAnimation.uplugin
+      Binaries/   ← 빌드된 zip에만 있음
       Scripts/  Source/  Wheels/ ...
 ```
 
 3. 프로젝트를 Git으로 관리한다면 이 폴더를 그대로 커밋합니다. 휠(`Wheels/*.whl`, 약 28 MB)은 플러그인에 들어 있는 `.gitattributes` 때문에 Git LFS로 올라갑니다(프로젝트에 Git LFS 설치 필요).
 
-> **주의**: GitHub의 `Code > Download ZIP`이나 태그의 `Source code (zip)`은 Git LFS 파일을 포함하지 않아, 휠 대신 작은 텍스트 파일이 들어 있습니다. 반드시 Releases에 첨부된 `KimodoAnimation-<버전>.zip`을 받으세요. `Wheels/*.whl`이 약 28 MB인지로 확인할 수 있습니다.
+> **주의**: GitHub의 `Code > Download ZIP`이나 태그의 `Source code (zip)`은 Git LFS 파일을 포함하지 않아, 휠 대신 작은 텍스트 파일이 들어 있습니다. 반드시 Releases에 첨부된 zip을 받으세요. `Wheels/*.whl`이 약 28 MB인지로 확인할 수 있습니다.
 
 ### 업데이트
 
 1. 에디터를 닫습니다.
 2. 기존 `Plugins/KimodoAnimation/` 폴더를 지우고, 새 버전 zip을 같은 위치에 풉니다(덮어쓰기만 하면 지워진 파일이 남을 수 있음).
-3. 프로젝트를 열면 플러그인 C++ 모듈을 다시 빌드합니다. 테이크 캐시, 설정, 설치한 Kimodo(`%LOCALAPPDATA%\KimodoAnimation\`)는 그대로 유지됩니다.
+3. 프로젝트를 엽니다(소스 zip이면 플러그인 C++ 모듈을 다시 빌드). 테이크 캐시, 설정, 설치한 Kimodo(`%LOCALAPPDATA%\KimodoAnimation\`)는 그대로 유지됩니다.
 
 변경 내용은 [CHANGELOG.md](CHANGELOG.md)에서 확인합니다.
 
 ### 빌드와 활성화
 
-1. 프로젝트(`.uproject`)를 열면 모듈 빌드 창이 뜹니다. **Yes/Build**를 누릅니다.
-   (또는 Visual Studio에서 `<프로젝트>Editor` 타깃을 빌드)
+1. 프로젝트(`.uproject`)를 엽니다.
+   - 빌드된 zip: 바로 열립니다.
+   - 소스 zip: 모듈 빌드 창이 뜨면 **Yes/Build**를 누릅니다(또는 Visual Studio에서 `<프로젝트>Editor` 타깃을 빌드).
 2. `PythonScriptPlugin`, `IKRig`, `Interchange`, `KimodoAnimation`은 자동으로 켜집니다.
 3. 메뉴 **`Tools > Kimodo Animation`**으로 패널을 엽니다.
 
@@ -365,6 +379,7 @@ powershell -ExecutionPolicy Bypass -File Tests\run_tests.ps1 -All     # 단위 +
 |---|---|
 | `This Hugging Face token cannot download Llama 3` | Llama 3 라이선스 승인이 끝났는지, 토큰이 같은 계정의 **Read** 토큰인지 확인 |
 | `Access to <repo> was denied` | 해당 Hugging Face 페이지에서 라이선스를 승인 |
+| 빌드된 zip을 넣었는데 “KimodoAnimation 모듈을 다시 빌드할까요?” / “다른 엔진 버전으로 빌드됨” | 엔진이 5.8.0이 아님(다른 핫픽스). 소스 zip으로 바꾸고 Visual Studio로 빌드 |
 | 설치가 “building from source”로 넘어가고 실패 | `Wheels/*.whl`이 약 28 MB인지 확인. 작다면 Releases의 `KimodoAnimation-<버전>.zip`을 다시 받거나, 프로젝트를 클론했다면 `git lfs pull`. 소스 빌드에는 Visual Studio C++, CMake, Git이 필요 |
 | `Write the Kimodo prompt in English.` | 영어로 쓰거나 `Interpret Agents`를 설정 |
 | `Kimodo is not installed on this computer` | 패널에서 Install Kimodo 실행. 경로를 바꿨다면 Local 설정의 Python/모델 캐시 경로 확인 |
