@@ -36,6 +36,7 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/Input/SSegmentedControl.h"
 #include "Widgets/Input/SSlider.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Images/SThrobber.h"
@@ -245,10 +246,7 @@ public:
 						[
 							MakeSection(LOCTEXT("SectionTarget", "Target"), MakeTargetArea())
 						]
-						+ SVerticalBox::Slot().AutoHeight()
-						[
-							MakeSection(LOCTEXT("SectionPrompt", "Prompt"), MakePromptArea())
-						]
+						// 프롬프트 입력은 아래 실행 바(Generate 바로 위)에 있다. 위에는 대상·결과(테이크)·저장만 둔다.
 						+ SVerticalBox::Slot().AutoHeight()
 						[
 							MakeSection(LOCTEXT("SectionTakes", "Takes"), MakeTakesArea(),
@@ -459,43 +457,49 @@ private:
 			];
 	}
 
-	/** 2. 프롬프트와 길이. 시드와 텍스트 인코더는 거의 바꾸지 않으므로 Advanced에 접어 둔다. */
+	/** 프롬프트 입력 블록(아래 실행 바 맨 위, Generate 바로 위). 채팅 입력창처럼 항상 보인다.
+	 *  1줄: 프롬프트 / 2줄: 단축키 안내 · Duration / 3줄: Advanced(시드·루트 모션·인코더, 접힘 상태 기억). */
 	TSharedRef<SWidget> MakePromptArea()
 	{
 		return SNew(SVerticalBox)
 			.IsEnabled_Lambda([this] { return !bBusy; })
 			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 4)
 			[
-				SAssignNew(Prompt, SMultiLineEditableTextBox)
-				.AutoWrapText(true)
-				.HintText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"))
-				.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& Event)
-				{
-					if (Event.GetKey() == EKeys::Tab && Prompt->GetText().IsEmptyOrWhitespace())
+				// 긴 프롬프트도 실행 바가 너무 커지지 않게 높이를 제한하고, 넘치면 입력칸 안에서 스크롤한다.
+				SNew(SBox)
+				.MaxDesiredHeight(84.0f)
+				[
+					SAssignNew(Prompt, SMultiLineEditableTextBox)
+					.AutoWrapText(true)
+					.HintText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"))
+					.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& Event)
 					{
-						Prompt->SetText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"));
-						return FReply::Handled();
-					}
-					return FReply::Unhandled();
-				})
+						if (Event.GetKey() == EKeys::Tab && Prompt->GetText().IsEmptyOrWhitespace())
+						{
+							Prompt->SetText(LOCTEXT("PromptHint", "Make a short forward hop and land softly with knees bent"));
+							return FReply::Handled();
+						}
+						return FReply::Unhandled();
+					})
+				]
 			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("PromptKeys", "English. Tab fills the example, Ctrl+Enter generates."))
-				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-			]
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 8)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 2)
 			[
 				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+				+ SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("PromptKeys", "English. Tab fills the example, Ctrl+Enter generates."))
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8, 0, 6, 0)
 				[
 					SNew(STextBlock).Text(LOCTEXT("Duration", "Duration"))
 				]
 				+ SHorizontalBox::Slot().AutoWidth()
 				[
 					SAssignNew(Duration, SEditableTextBox)
-					.MinDesiredWidth(64)
+					.MinDesiredWidth(56)
 					.Text(LOCTEXT("DefaultDuration", "2.0"))
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4, 0, 0, 0)
@@ -507,7 +511,12 @@ private:
 			[
 				SNew(SExpandableArea)
 				.AreaTitle(LOCTEXT("Advanced", "Advanced"))
-				.InitiallyCollapsed(true)
+				.InitiallyCollapsed(!GetDefault<UKimodoUserSettings>()->bAdvancedExpanded)
+				.OnAreaExpansionChanged_Lambda([](bool bExpanded) {
+					UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+					UserSettings->bAdvancedExpanded = bExpanded;
+					UserSettings->SaveConfig();
+				})
 				.Padding(FMargin(0, 6, 0, 0))
 				.BodyContent()
 				[
@@ -647,7 +656,15 @@ private:
 				+ SHorizontalBox::Slot().FillWidth(1)
 				[
 					SAssignNew(Revision, SEditableTextBox)
-					.HintText(LOCTEXT("RevisionHint", "Revise the selected take, e.g. Land in a deeper crouch"))
+					// 어느 테이크를 기준으로 고치는지(번호·시드) 안내문에 보여 준다. 고른 테이크가 없으면 입력을 막는다.
+					.IsEnabled_Lambda([this] { return GetSelectedTake().IsValid(); })
+					.HintText_Lambda([this] {
+						const TSharedPtr<FKimodoTake> Take = GetSelectedTake();
+						return Take.IsValid()
+							? FText::Format(LOCTEXT("RevisionHintTake", "Revise #{0} (seed {1}), e.g. Land in a deeper crouch"),
+								FText::AsNumber(Take->Number), FText::FromString(Take->Seed))
+							: LOCTEXT("RevisionHintNone", "Select a take above to revise it");
+					})
 					.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& Event)
 					{
 						if (Event.GetKey() == EKeys::Tab && Revision->GetText().IsEmptyOrWhitespace())
@@ -666,7 +683,12 @@ private:
 				+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0)
 				[
 					SNew(SButton)
-					.Text(LOCTEXT("Revise", "Revise"))
+					.Text_Lambda([this] {
+						const TSharedPtr<FKimodoTake> Take = GetSelectedTake();
+						return Take.IsValid()
+							? FText::Format(LOCTEXT("ReviseTake", "Revise #{0}"), FText::AsNumber(Take->Number))
+							: LOCTEXT("Revise", "Revise");
+					})
 					.ToolTipText(LOCTEXT("ReviseTip", "Regenerate from the selected take with this change (Enter). The result is added as a new take."))
 					.IsEnabled_Lambda([this] { return CanRevise(); })
 					.OnClicked_Lambda([this] {
@@ -820,6 +842,26 @@ private:
 			.Padding(FMargin(16, 8))
 			[
 				SNew(SVerticalBox)
+				// 프롬프트 입력 블록: Generate 바로 위. Kimodo를 설치하기 전에는 숨겨 설치 안내만 보이게 한다.
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda([this] { return !bNeedsInitialState && IsReady() ? EVisibility::Visible : EVisibility::Collapsed; })
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 4)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("SectionPrompt", "Prompt"))
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+					[
+						MakePromptArea()
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+					[
+						SNew(SSeparator).Thickness(1.0f)
+					]
+				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
 				[
 					SNew(SHorizontalBox)
@@ -878,6 +920,23 @@ private:
 						.Visibility_Lambda([this] { return bBusy && IsReady() ? EVisibility::Visible : EVisibility::Collapsed; })
 						.OnClicked_Lambda([this] { return RunAction(TEXT("cancel")); })
 					]
+					// Generate ×N: 같은 프롬프트로 여러 테이크를 차례로 만든다(시드만 다름). 누를 버튼 바로 옆에 둔다.
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+					[
+						SNew(SSegmentedControl<int32>)
+						.ToolTipText(LOCTEXT("BatchTip", "How many takes Generate makes from this prompt, one after another with different seeds.\nWith a seed entered, they use seed, seed+1, … Revise always makes one take."))
+						.IsEnabled_Lambda([this] { return !bBusy; })
+						.Value_Lambda([] { return GetBatchCount(); })
+						.OnValueChanged_Lambda([](int32 Value) {
+							UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+							UserSettings->BatchCount = Value;
+							UserSettings->SaveConfig();
+						})
+						+ SSegmentedControl<int32>::Slot(1).Text(LOCTEXT("Batch1", "×1"))
+						+ SSegmentedControl<int32>::Slot(3).Text(LOCTEXT("Batch3", "×3"))
+						+ SSegmentedControl<int32>::Slot(5).Text(LOCTEXT("Batch5", "×5"))
+						+ SSegmentedControl<int32>::Slot(10).Text(LOCTEXT("Batch10", "×10"))
+					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
 						SNew(SButton)
@@ -890,7 +949,12 @@ private:
 						})
 						[
 							SNew(STextBlock)
-							.Text(LOCTEXT("Generate", "Generate  (Ctrl+Enter)"))
+							.Text_Lambda([] {
+								const int32 Count = GetBatchCount();
+								return Count > 1
+									? FText::Format(LOCTEXT("GenerateBatch", "Generate ×{0}  (Ctrl+Enter)"), FText::AsNumber(Count))
+									: LOCTEXT("Generate", "Generate  (Ctrl+Enter)");
+							})
 							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
 						]
 					]
@@ -901,6 +965,12 @@ private:
 	// ---------------------------------------------------------------- helpers
 
 	bool IsReady() const { return SetupState == TEXT("ready"); }
+
+	/** Generate ×N의 N(1~10). Python(MAX_BATCH)도 같은 범위로 자른다. */
+	static int32 GetBatchCount()
+	{
+		return FMath::Clamp(GetDefault<UKimodoUserSettings>()->BatchCount, 1, 10);
+	}
 
 	bool CanGenerate() const
 	{
@@ -1060,6 +1130,7 @@ private:
 		Payload->SetStringField(TEXT("model"), Settings->ModelName);
 		Payload->SetArrayField(TEXT("align_bones"), ToJsonArray(AlignBones));
 		Payload->SetBoolField(TEXT("root_motion"), UserSettings->bRootMotion);
+		Payload->SetNumberField(TEXT("count"), GetBatchCount());
 		Payload->SetStringField(TEXT("python"), ResolveLocalPath(TEXT("KIMODO_PYTHON"), TEXT("ECLIPSE_KIMODO_PYTHON"), UserSettings->PythonExecutable.FilePath, GetManagedPython()));
 		Payload->SetStringField(TEXT("model_cache"), ResolveLocalPath(TEXT("KIMODO_MODEL_CACHE"), TEXT("ECLIPSE_KIMODO_MODEL_CACHE"), UserSettings->ModelCacheDirectory.Path, GetManagedInstallRoot() / TEXT("model-cache")));
 		Payload->SetStringField(TEXT("bootstrap_python"), GetBootstrapPython());
@@ -1299,13 +1370,20 @@ private:
 		SyncTakeSelection();
 	}
 
+	/** Python이 알려 준 선택 테이크(없으면 null). Revise 버튼·안내문이 기준 테이크를 보여 줄 때 쓴다. */
+	TSharedPtr<FKimodoTake> GetSelectedTake() const
+	{
+		const TSharedPtr<FKimodoTake>* Found = Takes.FindByPredicate([this](const TSharedPtr<FKimodoTake>& Take) { return Take->Id == SelectedTakeId; });
+		return Found ? *Found : TSharedPtr<FKimodoTake>();
+	}
+
 	void SyncTakeSelection()
 	{
 		if (!TakesView.IsValid()) return;
-		const TSharedPtr<FKimodoTake>* Found = Takes.FindByPredicate([this](const TSharedPtr<FKimodoTake>& Take) { return Take->Id == SelectedTakeId; });
-		if (Found)
+		const TSharedPtr<FKimodoTake> Found = GetSelectedTake();
+		if (Found.IsValid())
 		{
-			if (!TakesView->IsItemSelected(*Found)) TakesView->SetSelection(*Found, ESelectInfo::Direct);
+			if (!TakesView->IsItemSelected(Found)) TakesView->SetSelection(Found, ESelectInfo::Direct);
 		}
 		else
 		{
@@ -1430,9 +1508,27 @@ private:
 	TSharedRef<SDockTab> SpawnKimodoTab(const FSpawnTabArgs&)
 	{
 		return SNew(SDockTab).TabRole(ETabRole::NomadTab)
+			.OnTabClosed_Static(&FKimodoAnimationModule::OnKimodoTabClosed)
 		[
 			SNew(SKimodoPanel)
 		];
+	}
+
+	/** 패널 탭을 닫으면 진행 중인 생성을 멈추고 메모리에 띄워 둔 Kimodo 워커를 내린다(panel.py close_panel). */
+	static void OnKimodoTabClosed(TSharedRef<SDockTab>)
+	{
+		IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
+		if (!Python || !Python->IsPythonAvailable() || IsEngineExitRequested())
+		{
+			return;  // 에디터 종료 때는 panel.py의 종료 콜백이 정리한다.
+		}
+		FPythonCommandEx Command;
+		Command.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+		Command.FileExecutionScope = EPythonFileExecutionScope::Public;
+		Command.Flags = EPythonCommandFlags::Unattended;
+		// 패널 스크립트를 한 번도 불러오지 않았으면(생성 전) 할 일이 없다.
+		Command.Command = TEXT("if 'kimodo_animation_panel' in globals():\n    kimodo_animation_panel['close_panel']()\n");
+		Python->ExecPythonCommandEx(Command);
 	}
 
 	void RegisterMenus()

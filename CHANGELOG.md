@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Generate ×N**: a `×1 / ×3 / ×5 / ×10` selector right next to the Generate button makes several takes from one prompt in a row. The prompt is interpreted once; each take gets its own seed (random, or `seed, seed+1, …` when a seed is entered). Progress shows `Take 2/5`; Cancel keeps the takes already made. Revise always makes one take.
+- **Resident Kimodo worker**: the model is loaded once into a background process (`Scripts/kimodo_worker.py`) and reused, so a take with a cached prompt drops from about 17 s to about 4 s (RTX 5060, 2 s clip). The worker is unloaded after 10 minutes without generating, when the panel tab is closed, or when the editor exits. Cancel keeps it loaded: the cancelled request finishes in the background and its result is dropped. Output is byte-identical to the previous per-run process for the same seed.
+
+### Changed
+- The Prompt input (with Duration and Advanced) moved from the top of the panel to the always-visible bar at the bottom, right above Generate, so typing, choosing ×N and generating happen in one place. Advanced remembers whether it was expanded.
+
+### Fixes
+- Generating before `Restore last session` no longer gives new takes the same numbers as the previous session's takes. Restoring also renumbers duplicates already saved by 1.0.0.
+
 ## 1.0.0 — 2026-11-24
 
 First stable release for Unreal Engine 5.8 (Windows).

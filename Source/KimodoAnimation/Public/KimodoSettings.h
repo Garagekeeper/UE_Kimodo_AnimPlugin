@@ -112,6 +112,14 @@ public:
 	UPROPERTY(Config)
 	FString LastRetargeter;
 
+	/** Generate ×N: 한 번에 만들 테이크 수(1~10). 패널에서 마지막으로 고른 값. */
+	UPROPERTY(Config)
+	int32 BatchCount = 1;
+
+	/** 패널의 Advanced(시드·루트 모션·인코더)를 펼쳐 두었는지. 다음에 패널을 열 때 그대로 연다. */
+	UPROPERTY(Config)
+	bool bAdvancedExpanded = false;
+
 	/** 마지막으로 저장에 성공한 폴더. 비어 있으면 프로젝트 설정의 출력 폴더를 쓴다. */
 	UPROPERTY(Config)
 	FString LastSaveFolder;

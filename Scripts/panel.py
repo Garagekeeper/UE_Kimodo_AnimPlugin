@@ -28,6 +28,10 @@ retarget = runpy.run_path(str(SCRIPTS / "retarget.py"))["retarget"]
 direct_description = runpy.run_path(str(SCRIPTS / "interpret.py"))["direct_description"]
 HANGUL = re.compile(r"[ᄀ-ᇿ㄰-㆏가-힣]")
 TEXT_ENCODER_DEVICES = ("stream", "stream-exact", "cpu", "cuda", "auto")
+# Generate ×N: 한 번에 만들 수 있는 최대 테이크 수(테이크 목록 MAX_TAKES 안에서 비교할 수 있게).
+MAX_BATCH = 10
+# 상주 Kimodo 워커를 이 시간(초) 동안 쓰지 않으면 내려 VRAM·RAM을 돌려준다.
+WORKER_IDLE_SECONDS = 600
 # 터미널 색상·커서 코드(ESC[...m 등)와 줄바꿈 외 제어 문자. Slate 글꼴에 글리프가 없어 매 프레임 경고가 난다.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
 CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
@@ -199,6 +203,86 @@ def import_gltf(path, destination):
     if not mesh or not clip:
         raise RuntimeError("Unreal could not import the SOMA mesh and animation.")
     return mesh, clip
+
+
+class KimodoWorker:
+    """메모리에 Kimodo 모델을 띄워 둔 상주 프로세스(kimodo_worker.py).
+
+    처음 생성할 때 한 번 모델을 불러 두고(약 10초), 이후 생성은 프로세스 시작·로딩 없이 바로 한다.
+    WORKER_IDLE_SECONDS 동안 쓰지 않거나, 패널을 닫거나, 에디터를 끄면 내린다."""
+
+    def __init__(self, key, python, env, model, log_path):
+        self.key = key
+        self.log_path = log_path
+        self.ready = False
+        self.last_used = time.monotonic()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("wb") as log:
+            # stdin으로 요청을 보낸다. 에디터가 비정상 종료해도 파이프가 닫히면 워커가 스스로 끝난다.
+            self.process = subprocess.Popen(
+                [str(python), str(SCRIPTS / "kimodo_worker.py"), "--model", model],
+                cwd=log_path.parent, env=env, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", creationflags=NO_WINDOW,
+            )
+
+    @property
+    def pid(self):
+        return self.process.pid
+
+    def alive(self):
+        return self.process.poll() is None
+
+    def loaded(self):
+        # 한 번 READY를 보면 기억한다(로그가 길어져도 매 poll마다 다시 읽지 않도록).
+        if not self.ready:
+            self.ready = "WORKER READY" in read_tail(self.log_path, 65536)
+        return self.ready
+
+    def submit(self, request):
+        self.last_used = time.monotonic()
+        self.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+        self.process.stdin.flush()
+
+    def stop(self):
+        if not self.alive():
+            return
+        try:
+            self.process.stdin.close()  # 워커가 요청 루프를 빠져나와 정상 종료한다
+            self.process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=10)
+
+
+class WorkerTask:
+    """워커에 보낸 생성 요청 하나. Panel.process 자리에 들어가 subprocess.Popen처럼 poll()/pid를 제공한다."""
+
+    def __init__(self, worker, done_path):
+        self.worker = worker
+        self.done_path = done_path
+        self.error = ""
+
+    @property
+    def pid(self):
+        return self.worker.pid
+
+    def wait(self, timeout=None):
+        # Cancel은 워커 프로세스째 끝내므로 그 종료를 기다린다.
+        return self.worker.process.wait(timeout=timeout)
+
+    def poll(self):
+        if self.done_path.is_file():
+            try:
+                result = json.loads(self.done_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None  # 아직 쓰는 중
+            self.worker.last_used = time.monotonic()
+            self.error = result.get("error", "")
+            return 0 if result.get("ok") else 1
+        if not self.worker.alive():
+            self.error = f"the Kimodo worker stopped (see {self.worker.log_path})"
+            return self.worker.process.returncode or 1
+        return None
 
 
 def prune_jobs(jobs, keep=()):
@@ -403,6 +487,8 @@ class Panel:
         self.persisted = ""
         self.use_counter = 0
         self.restore_selected_number = None
+        # 메모리에 Kimodo를 띄워 둔 상주 워커(KimodoWorker). 처음 생성할 때 띄운다.
+        self.worker = None
 
     # -- takes -----------------------------------------------------------------
     def find_take(self, take_id):
@@ -631,6 +717,8 @@ class Panel:
         # 이 세션 목록에 없다고 지우면 남의 캐시를 지우게 되므로, 캐시는 테이크를 ✕로 뺄 때만 지운다.
         self.migrate_take_folders(config, entries)
         usable = [e for e in entries if self.entry_restorable(e)]
+        # 복원 전에 새로 생성해도 번호가 이전 세션 테이크와 겹치지 않도록 이어서 매긴다.
+        self.take_counter = max([self.take_counter] + [int(e.get("number") or 0) for e in entries])
         if usable:
             self.restorable = usable
             count = len(usable)
@@ -694,8 +782,18 @@ class Panel:
                 cached=entry.get("cached", "")))
         # 이전 세션 테이크를 앞(오래된 쪽)에 두고, 그사이 새로 만든 테이크를 뒤에 둔다.
         current = self.takes
+        # 이전 버전에서 복원 전에 만든 테이크는 번호가 겹칠 수 있다(저장된 목록에 이미 겹쳐 있을 수도 있음).
+        # 앞(오래된 쪽)의 번호를 유지하고, 겹치는 뒤쪽 테이크를 새 번호로 옮긴다.
         self.takes = restored + current
-        self.take_counter = max([self.take_counter] + [t["number"] for t in self.takes])
+        self.take_counter = max([self.take_counter] + [t["number"] or 0 for t in self.takes])
+        used = set()
+        for take in self.takes:
+            if not take["number"] or take["number"] in used:
+                self.take_counter += 1
+                take["number"] = self.take_counter
+            used.add(take["number"])
+        # 번호를 옮긴 테이크가 목록 중간에 남지 않도록 번호 순으로 정렬한다(목록은 최신 번호가 위로 보인다).
+        self.takes.sort(key=lambda t: t["number"])
 
         self.prune_takes()
         # 클릭할 때 끊기지 않도록 Restore에서 전부 불러온다(최대 MAX_TAKES개 모두 메모리에 유지).
@@ -749,6 +847,14 @@ class Panel:
         else:
             seed = random.randrange(2**31)
 
+        # Generate ×N: 같은 프롬프트로 N개를 차례로 만든다. 해석은 한 번만 하고, 시드는 테이크마다 다르게 쓴다
+        # (시드를 넣었으면 seed, seed+1, …; 비우면 무작위). 수정은 시드를 유지하므로 항상 1개.
+        try:
+            count = int(config.get("count") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        count = 1 if revision else max(1, min(MAX_BATCH, count))
+
         # 해석 CLI가 없으면 프롬프트를 그대로 Kimodo에 전달하므로 영어만 받는다.
         agents = selected_agents(config)
         if not agents and HANGUL.search(prompt):
@@ -782,6 +888,7 @@ class Panel:
             "duration": duration, "seed": seed, "request": prompt,
             # 수정은 고른 테이크를 기준으로 하므로, 결과 테이크의 원래 요청을 "기준 + 수정"으로 남긴다.
             "base_prompt": (self.selected_take() or {}).get("prompt", "") if revision else "",
+            "batch": {"index": 1, "total": count, "fixed_seed": bool(seed_text), "base_seed": seed},
         }
         # Llama 3 8B 텍스트 인코더 방식. 기본 stream은 층을 하나씩 읽어 RAM 1~2 GB로 돌고,
         # cpu/cuda/auto는 모델 전체(약 16 GB)를 올린다. 어느 쪽이든 같은 프롬프트는 캐시를 쓴다.
@@ -820,6 +927,8 @@ class Panel:
             raise FileNotFoundError(f"Unreal's bundled Python was not found at {bootstrap}.")
         if not config.get("python") or not config.get("model_cache"):
             raise ValueError("The Kimodo Python and model cache paths are not set.")
+        # 설치가 venv를 바꾸므로 그 Python으로 띄운 워커를 먼저 내린다.
+        self.stop_worker()
 
         folder = Path(config["work_dir"]) / "Setup"
         folder.mkdir(parents=True, exist_ok=True)
@@ -856,13 +965,40 @@ class Panel:
         prompt = ", ".join(part.strip() for part in result["english"].split(".") if part.strip())
         self.english_prompt = prompt
         duration = self.job["duration"]
-        self.launch([
-            str(self.job["python"]), str(SCRIPTS / "kimodo_generate.py"), "--model", self.job["model"],
-            "--duration", str(duration), "--num_samples", "1", "--seed", str(self.job["seed"]), "--bvh",
-            "--bvh_standard_tpose", "--no-postprocess", "--output", str(folder / "SOMA"),
-            "--", prompt,
-        ], self.job["env"])
+        # 상주 워커에 요청한다(kimodo_generate.py CLI와 같은 설정: 샘플 1개, 후처리 끔, 표준 T포즈 BVH).
+        worker = self.ensure_worker()
+        done = folder / "Kimodo.done.json"
+        worker.submit({"prompt": prompt, "duration": duration, "seed": self.job["seed"], "output": str(folder / "SOMA"),
+                       "log": str(folder / "Kimodo.log"), "done": str(done)})
+        self.process = WorkerTask(worker, done)
         self.message = f"Generating {duration:g}s in Kimodo…"
+
+    # -- resident Kimodo worker ---------------------------------------------------
+    def ensure_worker(self):
+        """작업 설정(Python, 모델, 인코더, 캐시)에 맞는 워커를 돌려준다. 없거나 설정이 바뀌었으면 새로 띄운다."""
+        env = self.job["env"]
+        key = (str(self.job["python"]), self.job["model"], env.get("KIMODO_TEXT_ENCODER"), env.get("HF_HUB_CACHE"))
+        if self.worker is not None and (self.worker.key != key or not self.worker.alive()):
+            self.stop_worker()
+        if self.worker is None:
+            self.worker = KimodoWorker(key, self.job["python"], env, self.job["model"],
+                                       Path(self.job["work_dir"]) / "KimodoWorker.log")
+        return self.worker
+
+    def stop_worker(self):
+        if self.worker is not None:
+            self.worker.stop()
+            self.worker = None
+
+    def stop_idle_worker(self):
+        if (self.worker is not None and self.process is None
+                and time.monotonic() - self.worker.last_used > WORKER_IDLE_SECONDS):
+            self.stop_worker()
+
+    def close(self):
+        """패널 탭을 닫을 때: 진행 중인 작업을 멈추고 워커를 내려 메모리를 돌려준다."""
+        self.cancel()
+        self.stop_worker()
 
     def launch(self, argv, env=None):
         log = self.job["folder"] / (self.job["stage"] + ".log")
@@ -890,8 +1026,11 @@ class Panel:
                 return
             # 단계·진행률·로그 마지막 줄은 progress()로 따로 넘겨 진행 막대와 툴팁에 보여 준다.
             self.message = f"{self.job['duration']:g}s clip · seed {self.job['seed']} · {elapsed}s elapsed"
+            if self.batch_label():
+                self.message = f"{self.batch_label()} · {self.message}"
             return
 
+        finished = self.process
         self.process = None
         if stage == "Setup":
             progress = self.setup_progress()
@@ -903,7 +1042,9 @@ class Panel:
             self.message = progress.get("message") or "Kimodo is installed."
             return
         if status:
-            raise RuntimeError(f"{stage} exited with code {status}. See {folder / (stage + '.log')}")
+            # 워커 요청이면 실패 원인(예외 메시지)을 함께 보여 준다.
+            reason = getattr(finished, "error", "") or f"exited with code {status}"
+            raise RuntimeError(f"{stage} failed: {reason}. See {folder / (stage + '.log')}")
         if stage == "Interpretation":
             self.generate()
             return
@@ -952,16 +1093,50 @@ class Panel:
         label = f"{target.get_name()} · {self.job['rig_label']}"
         if self.job["root_motion"] and not self.job["retargeter"]:
             label += " · root motion"
+        if self.continue_batch():
+            return
+        batch = self.job.get("batch") or {}
         self.job = None
-        self.message = f"Preview ready · {clip.get_play_length():.2f}s · seed {self.seed} · {label}"
+        # dispatch()가 "Preview ready"로 시작하는지로 성공 알림을 판단하므로 접두어를 유지한다.
+        count = f"{batch['total']} takes · " if batch.get("total", 1) > 1 else ""
+        self.message = f"Preview ready · {count}{clip.get_play_length():.2f}s · seed {self.seed} · {label}"
+
+    def batch_label(self):
+        """Generate ×N 진행 중이면 "Take 2/5", 아니면 빈 문자열."""
+        batch = (self.job or {}).get("batch") or {}
+        return f"Take {batch['index']}/{batch['total']}" if batch.get("total", 1) > 1 else ""
+
+    def continue_batch(self):
+        """Generate ×N의 다음 테이크를 시작한다. 남은 것이 없으면 False.
+        해석 결과(interpretation.json)를 새 작업 폴더로 복사해 해석 단계를 건너뛰고 바로 Kimodo를 실행한다."""
+        batch = self.job.get("batch") or {}
+        if batch.get("index", 1) >= batch.get("total", 1):
+            return False
+        previous = self.job
+        folder = previous["folder"].parent / uuid4().hex
+        folder.mkdir(parents=True)
+        shutil.copyfile(previous["folder"] / "interpretation.json", folder / "interpretation.json")
+        batch = dict(batch, index=batch["index"] + 1)
+        seed = ((batch["base_seed"] + batch["index"] - 1) % 2**31 if batch["fixed_seed"]
+                else random.randrange(2**31))
+        # 작업 dict에도 take_root가 있어 take_staging에 그대로 넘길 수 있다.
+        staging = take_staging(previous, previous["output_folder"])
+        self.job = dict(previous, folder=folder, seed=seed, staging=staging, batch=batch,
+                        stage="Interpretation", started=time.monotonic())
+        self.generate()
+        return True
 
     def cancel(self):
         if self.process is None:
             return
 
-        # 해석 단계의 CLI처럼 자식 프로세스가 남지 않도록 프로세스 트리 전체를 종료한다.
         process = self.process
-        if os.name == "nt":
+        if isinstance(process, WorkerTask):
+            # 상주 워커는 내리지 않는다(다시 불러오는 데 약 10초). 이 요청은 워커가 마저 끝내고(보통 몇 초),
+            # 결과는 버린다. 다음 요청은 그 뒤에 처리된다. 패널을 닫을 때는 close()가 워커를 따로 내린다.
+            pass
+        elif os.name == "nt":
+            # 해석 단계의 CLI처럼 자식 프로세스가 남지 않도록 프로세스 트리 전체를 종료한다.
             # taskkill /F는 종료를 마친 뒤 돌아오므로 아래 대기는 짧게 둔다(에디터 메인 스레드).
             subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(process.pid)],
@@ -970,17 +1145,21 @@ class Panel:
             )
         else:
             process.kill()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            u.log_warning(f"Kimodo process {process.pid} did not exit after cancellation.")
+        if not isinstance(process, WorkerTask):
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                u.log_warning(f"Kimodo process {process.pid} did not exit after cancellation.")
 
         # 선택한 테이크의 해석과 프롬프트로 되돌린다.
         stage = self.job["stage"]
+        batch = self.batch_label()
         self.process = None
         self.job = None
         self.apply_selected()
         self.message = f"Cancelled during {stage}. The previous preview is unchanged."
+        if batch:
+            self.message = f"Cancelled at {batch}. Takes already made are kept."
 
     @staticmethod
     def delete_staging(path):
@@ -1006,6 +1185,12 @@ class Panel:
         if stage == "Interpretation":
             return "Interpreting request", -1.0, detail
         if stage == "Kimodo":
+            if not (folder / "Kimodo.log").is_file() and self.worker is not None:
+                if not self.worker.loaded():
+                    # 워커가 아직 모델을 불러오는 중(처음 생성할 때만). 워커 로그의 마지막 줄을 보여 준다.
+                    return "Loading Kimodo", -1.0, last_log_line(self.worker.log_path)
+                # 취소한 직전 요청을 워커가 마저 끝내는 중. 끝나면 이 요청을 바로 시작한다.
+                return "Finishing the cancelled take", -1.0, ""
             label, fraction = kimodo_progress(folder / "Kimodo.log")
             return label, fraction, detail
         if stage == "Conversion":
@@ -1044,12 +1229,22 @@ panel = Panel()
 def shutdown():
     # 에디터를 닫을 때 진행 중인 해석·생성·변환 프로세스를 함께 종료한다.
     try:
-        panel.cancel()
+        panel.close()
     except Exception:
         u.log_warning(traceback.format_exc())
 
 
 u.register_python_shutdown_callback(shutdown)
+
+
+def close_panel():
+    """C++ 패널 탭이 닫힐 때 호출한다. 진행 중인 생성을 멈추고 상주 Kimodo 워커를 내려 메모리를 돌려준다.
+    테이크 목록은 남아 있어 패널을 다시 열면 그대로 보인다."""
+    try:
+        panel.close()
+        panel.persist_session()
+    except Exception:
+        u.log_warning(traceback.format_exc())
 
 
 def dispatch(encoded_payload):
@@ -1064,6 +1259,7 @@ def dispatch(encoded_payload):
     event = ""
     try:
         panel.delete_stale_previews()
+        panel.stop_idle_worker()
         if action in ("generate", "revise"):
             panel.start(value, payload.get("duration", ""), action == "revise", payload)
         elif action == "poll":
@@ -1092,7 +1288,8 @@ def dispatch(encoded_payload):
                 panel.remove_take(value)
     except Exception as error:
         u.log_error(traceback.format_exc())
-        panel.message = str(error)
+        batch = panel.batch_label() if panel.process is None else ""
+        panel.message = f"{batch} failed: {error}" if batch else str(error)
         if panel.process is None:
             panel.job = None
             panel.apply_selected()
