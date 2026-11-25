@@ -6,6 +6,9 @@
 - Prebuilt download `KimodoAnimation-<version>-Win64-UE5.8.zip` with the compiled editor DLL, so Blueprint-only projects can use the plugin without Visual Studio (first published for 1.1.0, verified on a separate PC). The source zip stays for C++ projects and other engine hotfixes.
 - Automated tests in `Tests/` (unit, Kimodo worker integration, headless editor) with `Tests/run_tests.ps1`.
 
+### Fixes
+- The progress line no longer shows `Loading Kimodo` at the start of every take once Kimodo is resident (it shows `Starting generation`), and `Finishing the cancelled take` appears only after a Cancel.
+
 ## 1.1.0 — 2026-11-25
 
 ### Added

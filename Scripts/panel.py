@@ -217,6 +217,8 @@ class KimodoWorker:
         self.key = key
         self.log_path = log_path
         self.ready = False
+        # 취소했지만 워커가 아직 처리 중일 수 있는 요청의 결과 파일(진행 표시용).
+        self.abandoned = None
         self.last_used = time.monotonic()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:
@@ -415,6 +417,9 @@ def kimodo_progress(path):
         return "Generating motion", 0.0
     if "Text encoder:" in text:
         return "Encoding prompt", -1.0
+    # 상주 워커는 모델이 이미 메모리에 있어 로딩하지 않는다. 인코더를 부르기 전 잠깐의 준비 구간이다.
+    if "(resident worker)" in text:
+        return "Starting generation", -1.0
     return "Loading Kimodo", -1.0
 
 
@@ -1144,7 +1149,8 @@ class Panel:
         if isinstance(process, WorkerTask):
             # 상주 워커는 내리지 않는다(다시 불러오는 데 약 10초). 이 요청은 워커가 마저 끝내고(보통 몇 초),
             # 결과는 버린다. 다음 요청은 그 뒤에 처리된다. 패널을 닫을 때는 close()가 워커를 따로 내린다.
-            pass
+            # 다음 요청의 진행 표시가 "취소한 테이크 마무리 중"을 보여 줄 수 있도록 그 결과 파일을 기억한다.
+            process.worker.abandoned = process.done_path
         elif os.name == "nt":
             # 해석 단계의 CLI처럼 자식 프로세스가 남지 않도록 프로세스 트리 전체를 종료한다.
             # taskkill /F는 종료를 마친 뒤 돌아오므로 아래 대기는 짧게 둔다(에디터 메인 스레드).
@@ -1199,8 +1205,12 @@ class Panel:
                 if not self.worker.loaded():
                     # 워커가 아직 모델을 불러오는 중(처음 생성할 때만). 워커 로그의 마지막 줄을 보여 준다.
                     return "Loading Kimodo", -1.0, last_log_line(self.worker.log_path)
-                # 취소한 직전 요청을 워커가 마저 끝내는 중. 끝나면 이 요청을 바로 시작한다.
-                return "Finishing the cancelled take", -1.0, ""
+                abandoned = getattr(self.worker, "abandoned", None)
+                if abandoned is not None and not abandoned.is_file():
+                    # 취소한 직전 요청을 워커가 마저 끝내는 중. 끝나면 이 요청을 바로 시작한다.
+                    return "Finishing the cancelled take", -1.0, ""
+                # 워커가 요청을 막 받아 로그 파일을 열기 직전(보통 1초 미만).
+                return "Starting generation", -1.0, ""
             label, fraction = kimodo_progress(folder / "Kimodo.log")
             return label, fraction, detail
         if stage == "Conversion":

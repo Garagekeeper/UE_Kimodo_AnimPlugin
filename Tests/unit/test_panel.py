@@ -197,6 +197,32 @@ class ResidentWorker(unittest.TestCase):
         self.assertIsNone(p.worker)
         self.assertTrue(worker.stopped)
 
+    def test_stage_label_before_the_request_log_exists(self):
+        p = new_panel()
+        p.job = self.job()
+        worker = p.ensure_worker()
+        worker.abandoned = None
+        folder = Path(tempfile.mkdtemp())
+        p.job.update(stage="Kimodo", folder=folder)
+        p.process = panel.WorkerTask(worker, folder / "Kimodo.done.json")
+        self.assertEqual(p.progress()[0], "Starting generation")
+        worker.abandoned = Path(tempfile.mkdtemp()) / "old.done.json"  # 취소한 요청이 아직 안 끝남
+        self.assertEqual(p.progress()[0], "Finishing the cancelled take")
+        worker.abandoned.write_text('{"ok": true}', encoding="utf-8")
+        self.assertEqual(p.progress()[0], "Starting generation")
+        worker.loaded = lambda: False
+        self.assertEqual(p.progress()[0], "Loading Kimodo")
+
+    def test_cancel_remembers_the_abandoned_request(self):
+        p = new_panel()
+        p.job = self.job()
+        worker = p.ensure_worker()
+        done = Path(tempfile.mkdtemp()) / "Kimodo.done.json"
+        p.job.update(stage="Kimodo", batch={"index": 1, "total": 1})
+        p.process = panel.WorkerTask(worker, done)
+        p.cancel()
+        self.assertEqual(worker.abandoned, done)
+
     def test_worker_task_reports_done_file_and_dead_worker(self):
         worker = FakeWorker(None, None, None, None, Path("worker.log"))
         done = Path(tempfile.mkdtemp()) / "Kimodo.done.json"
@@ -245,6 +271,9 @@ class Helpers(unittest.TestCase):
         self.assertEqual(panel.kimodo_progress(log)[0], "Encoding prompt")
         log.write_text("Text encoder: cached embedding\n 37%|###| 37/100 [00:01<00:02]\r 50%|###| 50/100 [", encoding="utf-8")
         self.assertEqual(panel.kimodo_progress(log), ("Generating motion", 0.5))
+        # 상주 워커 요청은 모델을 불러오지 않으므로 "Loading Kimodo"가 아니어야 한다.
+        log.write_text("Using device: cuda:0\nLoaded model: kimodo-soma-rp-v1.2 (resident worker)\n", encoding="utf-8")
+        self.assertEqual(panel.kimodo_progress(log), ("Starting generation", -1.0))
 
     def test_last_log_line_handles_carriage_returns(self):
         log = Path(tempfile.mkdtemp()) / "x.log"
