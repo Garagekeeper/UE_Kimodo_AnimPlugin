@@ -1,19 +1,15 @@
 # Changelog
 
-## Unreleased
-
-### Fixes
-- Preview camera: holding the right mouse button with WASD / QE flies the camera again (left-drag still orbits); after flying, the orbit center moves in front of the camera.
-- A take made with `Generate with keys` starts with no keys. Its pose already includes the key offsets, so reusing the same keys would apply them twice; the keys stay on the base take.
-- Panel Body keys help text describes the engine gizmo colors (red forward, green right, blue up).
-
 ## 1.2.0 — 2026-11-26
 
 ### Added
 - **Body keys** (under Takes): set where a hand, a foot or the hips (the five parts Kimodo can pin) should be at given times, relative to the selected take's pose (cm right / up / forward), then `Generate with keys` regenerates with Kimodo end-effector constraints using the take's prompt, seed, length and steps. A hips key also moves the body's ground position and height, so lowering it crouches. Includes `+ Key at playhead` and a `Big wave preset` (big, slow hello wave: 25 cm → 67 cm swing in the test case).
 - **Sequencer-style key editing**: a key timeline under the preview (tracks RH/LH/RF/LF/Hip; click a diamond to select, drag it in time, double-click or right-click to add, Delete/K), a `+ Add Key` bar with a part selector, and the engine's move gizmo in the preview (red forward / green right / blue up, character-relative, with plane handles) that updates the selected key's cm values live; other keys show as cyan markers. The area under the preview is resizable and always shows all five tracks. The Body keys list shows every key, sorted by part and time; a part can't have two keys at the same time.
-- **Keys per take**: switching takes loads that take's keys, edits are saved with the take (and in the restored session), and a take made with keys starts with the keys it was made from. Takes also remember their requested length.
+- **Keys per take**: switching takes loads that take's keys, edits are saved with the take (and in the restored session), and a take made with keys starts with no keys (its pose already includes them, so reusing them would apply the offsets twice). Takes also remember their requested length.
 - `Advanced > Steps`: diffusion step count (1-1000, default 100, `Default` button). Takes remember their step count, and takes not made with 100 steps show it in the status line. Same seed + steps + duration + model reproduces a take; the worker gives byte-identical output to the Kimodo CLI's `--diffusion_steps`.
+
+### Changed
+- Preview camera works like an editor viewport: left-drag orbits, the wheel zooms, holding the right mouse button with WASD / QE flies (the orbit center then moves in front of the camera).
 
 ## 1.1.1 — 2026-11-25
 
