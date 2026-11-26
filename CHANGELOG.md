@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `Advanced > Steps`: diffusion step count (1-1000, default 100, `Default` button). Takes remember their step count, and takes not made with 100 steps show it in the status line. Same seed + steps + duration + model reproduces a take; the worker gives byte-identical output to the Kimodo CLI's `--diffusion_steps`.
+
 ## 1.1.1 — 2026-11-25
 
 ### Added

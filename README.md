@@ -345,6 +345,7 @@ Kimodo는 프롬프트를 **Llama 3 8B**(LLM2Vec) 텍스트 인코더로 4096차
 | Interpret Agents | 프롬프트를 다듬을 CLI 순서(`codex`, `claude`, `gemini`). 비우면 프롬프트를 그대로 사용 | `KIMODO_AGENTS` |
 | Text Encoder Device | 위 표 참고 | |
 | Root Motion | 패널의 `Advanced > Root motion`과 같은 값 | |
+| Diffusion Steps | 패널의 `Advanced > Steps`와 같은 값(1~1000, 기본 100) | |
 
 **프롬프트 해석(선택)**: `Interpret Agents`에 설치된 CLI(예: `claude`)를 지정하면, 한국어 등 자유로운 요청을 Kimodo가 잘 이해하는 짧은 영어 동작 설명으로 바꾼 뒤 생성합니다. 해석 결과는 Takes의 Input prompt에 표시됩니다. 지정한 CLI가 모두 실패하면 원래 프롬프트를 그대로 씁니다(이때는 영어여야 함).
 

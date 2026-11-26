@@ -41,12 +41,13 @@ class WorkerMatchesCli(unittest.TestCase):
                        TEXT_ENCODER_DEVICE="cpu", KIMODO_TEXT_ENCODER="stream",
                        KIMODO_EMBEDDING_CACHE=str(CACHE / "kimodo-text-embeddings"), PYTHONUNBUFFERED="1")
 
-    def run_cli(self, seed):
-        stem = self.out / f"cli_{seed}"
+    def run_cli(self, seed, steps=100):
+        stem = self.out / f"cli_{seed}_{steps}"
         started = time.monotonic()
         with open(str(stem) + ".log", "wb") as log:
             subprocess.run([str(PYTHON), str(SCRIPTS / "kimodo_generate.py"), "--model", MODEL, "--duration", "2.0",
-                            "--num_samples", "1", "--seed", str(seed), "--bvh", "--bvh_standard_tpose",
+                            "--num_samples", "1", "--seed", str(seed), "--diffusion_steps", str(steps),
+                            "--bvh", "--bvh_standard_tpose",
                             "--no-postprocess", "--output", str(stem), "--", PROMPT],
                            env=self.env, stdout=log, stderr=subprocess.STDOUT, check=True, creationflags=NO_WINDOW)
         return Path(str(stem) + ".bvh"), time.monotonic() - started
@@ -55,6 +56,7 @@ class WorkerMatchesCli(unittest.TestCase):
         # 임베딩 캐시를 먼저 채워 CLI와 워커가 같은 조건(캐시된 프롬프트)에서 비교되게 한다.
         self.run_cli(6)
         cli_bvh, cli_seconds = self.run_cli(7)
+        cli20_bvh, _ = self.run_cli(7, steps=20)
 
         log = open(self.out / "worker.log", "wb")
         worker = subprocess.Popen([str(PYTHON), str(SCRIPTS / "kimodo_worker.py"), "--model", MODEL], env=self.env,
@@ -62,11 +64,12 @@ class WorkerMatchesCli(unittest.TestCase):
                                   encoding="utf-8", creationflags=NO_WINDOW)
         try:
             results = []
-            for index, seed in enumerate((7, 8, 7)):
-                stem = self.out / f"w{index}_{seed}"
+            for index, (seed, steps) in enumerate(((7, 100), (8, 100), (7, 100), (7, 20))):
+                stem = self.out / f"w{index}_{seed}_{steps}"
                 done = Path(str(stem) + ".done.json")
                 started = time.monotonic()
-                worker.stdin.write(json.dumps({"prompt": PROMPT, "duration": 2.0, "seed": seed, "output": str(stem),
+                worker.stdin.write(json.dumps({"prompt": PROMPT, "duration": 2.0, "seed": seed, "steps": steps,
+                                               "output": str(stem),
                                                "log": str(stem) + ".log", "done": str(done)}) + "\n")
                 worker.stdin.flush()
                 while not done.exists():
@@ -85,6 +88,8 @@ class WorkerMatchesCli(unittest.TestCase):
         self.assertTrue(filecmp.cmp(cli_bvh, results[0][0], shallow=False), "worker seed 7 differs from CLI seed 7")
         self.assertTrue(filecmp.cmp(cli_bvh, results[2][0], shallow=False), "seed 7 after another request differs")
         self.assertFalse(filecmp.cmp(results[0][0], results[1][0], shallow=False), "seeds 7 and 8 should differ")
+        self.assertTrue(filecmp.cmp(cli20_bvh, results[3][0], shallow=False), "worker 20 steps differs from CLI 20 steps")
+        self.assertFalse(filecmp.cmp(results[0][0], results[3][0], shallow=False), "20 and 100 steps should differ")
         resident = (results[1][1] + results[2][1]) / 2
         print(f"\nCLI {cli_seconds:.1f}s, worker first {results[0][1]:.1f}s, resident avg {resident:.1f}s", file=sys.stderr)
         self.assertLess(resident, cli_seconds, "resident requests should be faster than a CLI run")

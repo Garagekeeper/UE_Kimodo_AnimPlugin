@@ -37,6 +37,7 @@
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SSegmentedControl.h"
+#include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Input/SSlider.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Images/SThrobber.h"
@@ -560,6 +561,43 @@ private:
 							})
 						]
 					]
+					// 확산 스텝: 적을수록 빠르고 거칠다. 같은 시드라도 스텝이 다르면 다른 동작이 나온다.
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 6)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+						[
+							SNew(SBox).MinDesiredWidth(90)[SNew(STextBlock).Text(LOCTEXT("Steps", "Steps"))]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SBox).WidthOverride(110)
+							[
+								SNew(SSpinBox<int32>)
+								.MinValue(1).MaxValue(1000).MinSliderValue(1).MaxSliderValue(200).Delta(1)
+								.ToolTipText(LOCTEXT("StepsTip", "Diffusion steps (Kimodo default 100). Fewer steps are faster but rougher.\nThe same seed gives a different motion with a different step count, so keep both to reproduce a take."))
+								.Value_Lambda([] { return GetDiffusionSteps(); })
+								.OnValueCommitted_Lambda([](int32 Value, ETextCommit::Type) {
+									UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+									UserSettings->DiffusionSteps = FMath::Clamp(Value, 1, 1000);
+									UserSettings->SaveConfig();
+								})
+							]
+						]
+						+ SHorizontalBox::Slot().AutoWidth().Padding(6, 0, 0, 0)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("DefaultSteps", "Default"))
+							.ToolTipText(LOCTEXT("DefaultStepsTip", "Back to 100 steps."))
+							.IsEnabled_Lambda([] { return GetDiffusionSteps() != 100; })
+							.OnClicked_Lambda([] {
+								UKimodoUserSettings* UserSettings = GetMutableDefault<UKimodoUserSettings>();
+								UserSettings->DiffusionSteps = 100;
+								UserSettings->SaveConfig();
+								return FReply::Handled();
+							})
+						]
+					]
 					// 루트 모션: Kimodo는 이동을 pelvis에만 넣으므로, 켜면 pelvis 이동으로 root 이동을 만든다.
 					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0, 0, 0, 6)
 					[
@@ -976,6 +1014,12 @@ private:
 		return FMath::Clamp(GetDefault<UKimodoUserSettings>()->BatchCount, 1, 10);
 	}
 
+	/** 확산 스텝(1~1000, 기본 100). Python(panel.py)도 같은 범위로 자른다. */
+	static int32 GetDiffusionSteps()
+	{
+		return FMath::Clamp(GetDefault<UKimodoUserSettings>()->DiffusionSteps, 1, 1000);
+	}
+
 	bool CanGenerate() const
 	{
 		return GenerateBlockedReason().IsEmpty();
@@ -1135,6 +1179,7 @@ private:
 		Payload->SetArrayField(TEXT("align_bones"), ToJsonArray(AlignBones));
 		Payload->SetBoolField(TEXT("root_motion"), UserSettings->bRootMotion);
 		Payload->SetNumberField(TEXT("count"), GetBatchCount());
+		Payload->SetNumberField(TEXT("steps"), GetDiffusionSteps());
 		Payload->SetStringField(TEXT("python"), ResolveLocalPath(TEXT("KIMODO_PYTHON"), TEXT("ECLIPSE_KIMODO_PYTHON"), UserSettings->PythonExecutable.FilePath, GetManagedPython()));
 		Payload->SetStringField(TEXT("model_cache"), ResolveLocalPath(TEXT("KIMODO_MODEL_CACHE"), TEXT("ECLIPSE_KIMODO_MODEL_CACHE"), UserSettings->ModelCacheDirectory.Path, GetManagedInstallRoot() / TEXT("model-cache")));
 		Payload->SetStringField(TEXT("bootstrap_python"), GetBootstrapPython());

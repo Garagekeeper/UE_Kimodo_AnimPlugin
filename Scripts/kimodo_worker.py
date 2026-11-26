@@ -5,7 +5,7 @@
 
 Usage: python kimodo_worker.py --model <name>
        환경변수는 kimodo_generate.py와 같다(KIMODO_TEXT_ENCODER, KIMODO_EMBEDDING_CACHE, HF_HUB_CACHE …).
-요청:  {"prompt": str, "duration": float, "seed": int, "output": <확장자 없는 출력 경로>,
+요청:  {"prompt": str, "duration": float, "seed": int, "steps": int(확산 스텝, 기본 100), "output": <확장자 없는 출력 경로>,
         "log": <이 생성의 로그 파일>, "done": <끝나면 쓸 결과 파일>}
 결과:  done 파일에 {"ok": true} 또는 {"ok": false, "error": "..."} (임시 파일에 쓴 뒤 이름을 바꿔 원자적으로).
 stdin이 닫히면(패널이 종료하거나 에디터가 꺼짐) 종료한다.
@@ -45,12 +45,14 @@ def write_done(path, result):
 def generate(model, device, request):
     """kimodo.scripts.generate.main()의 단일 샘플·BVH 경로와 같은 순서로 생성한다(같은 시드면 같은 결과)."""
     texts, num_frames = get_texts_and_num_frames_from_prompt(request["prompt"], str(request["duration"]), model.fps)
+    print(f"Diffusion steps: {int(request.get('steps') or 100)}")
     print("Will generate motions with the following prompts")
     for text, frames in zip(texts, num_frames):
         print(f"    '{text}' with {frames} frames")
     seed_everything(int(request["seed"]))
     output = model(
-        texts, num_frames, constraint_lst=[], num_denoising_steps=100, num_samples=1, multi_prompt=True,
+        texts, num_frames, constraint_lst=[], num_denoising_steps=int(request.get("steps") or 100), num_samples=1,
+        multi_prompt=True,
         num_transition_frames=5, post_processing=False, return_numpy=True,
     )
 

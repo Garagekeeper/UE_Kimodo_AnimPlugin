@@ -469,6 +469,27 @@ def suggest_name(take, folder):
     return name
 
 
+DEFAULT_STEPS = 100
+
+
+def parse_steps(value):
+    """확산 스텝(1~1000). 비었거나 잘못된 값이면 Kimodo 기본 100."""
+    try:
+        return max(1, min(1000, int(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_STEPS
+
+
+def steps_label(take):
+    """기본(100)이 아닐 때만 ' · 20 steps'처럼 붙인다. 시드와 함께 있어야 테이크를 그대로 재현할 수 있다."""
+    steps = (take or {}).get("steps")
+    return f" · {steps} steps" if steps and steps != DEFAULT_STEPS else ""
+
+
+def take_summary(take):
+    return f"Take #{take['number']} · {take['duration']:.2f}s · seed {take['seed']}{steps_label(take)}"
+
+
 def save_folder_of(config):
     folder = (config.get("save_folder") or "").strip().rstrip("/") or config.get("output_folder") or "/Game/Kimodo"
     return folder if re.fullmatch(r"(/[\w\-]+)+", folder) else ""
@@ -541,6 +562,8 @@ class Panel:
             "prompt": "", "english": "", "interpretation": "", "motion": "", "seed": None,
             "duration": clip.get_play_length() if clip else 0.0, "starred": False, "saved": "", "target": "",
             "source": None, "cached": "", "used": 0,
+            # 확산 스텝. 1.1.1 이전 테이크는 기록이 없다(None = 당시 기본 100).
+            "steps": None,
         }
         take.update(info)
         return take
@@ -652,7 +675,7 @@ class Panel:
         # 지운 테이크의 안내(Take #6 · …)가 상태 줄에 남지 않도록, 지금 고른 테이크 기준으로 다시 쓴다.
         current = self.selected_take()
         if current is not None:
-            self.message = f"Take #{current['number']} · {current['duration']:.2f}s · seed {current['seed']}"
+            self.message = take_summary(current)
         elif not self.takes:
             self.message = IDLE_MESSAGE
         else:
@@ -667,7 +690,7 @@ class Panel:
         self.touch(take)
         self.apply_selected()
         self.unload_extra()
-        self.message = f"Take #{take['number']} · {take['duration']:.2f}s · seed {take['seed']}"
+        self.message = take_summary(take)
 
     def toggle_star(self, take_id):
         take = self.find_take(take_id)
@@ -687,6 +710,7 @@ class Panel:
             "interpretation": take["interpretation"], "motion": take["motion"], "seed": take["seed"],
             "duration": take["duration"], "starred": take["starred"], "saved": take["saved"],
             "target": take["target"], "source": take.get("source"), "cached": take.get("cached", ""),
+            "steps": take.get("steps"),
         }
 
     def persist_session(self):
@@ -813,7 +837,7 @@ class Panel:
                 interpretation=entry.get("interpretation", ""), motion=entry.get("motion", ""),
                 seed=entry.get("seed"), duration=entry.get("duration") or 0.0, starred=bool(entry.get("starred")),
                 saved=entry.get("saved", ""), target=entry.get("target", ""), source=entry.get("source"),
-                cached=entry.get("cached", "")))
+                cached=entry.get("cached", ""), steps=entry.get("steps")))
         # 이전 세션 테이크를 앞(오래된 쪽)에 두고, 그사이 새로 만든 테이크를 뒤에 둔다.
         current = self.takes
         # 이전 버전에서 복원 전에 만든 테이크는 번호가 겹칠 수 있다(저장된 목록에 이미 겹쳐 있을 수도 있음).
@@ -888,6 +912,7 @@ class Panel:
         except (TypeError, ValueError):
             count = 1
         count = 1 if revision else max(1, min(MAX_BATCH, count))
+        steps = parse_steps(config.get("steps"))
 
         # 해석 CLI가 없으면 프롬프트를 그대로 Kimodo에 전달하므로 영어만 받는다.
         agents = selected_agents(config)
@@ -923,6 +948,7 @@ class Panel:
             # 수정은 고른 테이크를 기준으로 하므로, 결과 테이크의 원래 요청을 "기준 + 수정"으로 남긴다.
             "base_prompt": (self.selected_take() or {}).get("prompt", "") if revision else "",
             "batch": {"index": 1, "total": count, "fixed_seed": bool(seed_text), "base_seed": seed},
+            "steps": steps,
         }
         # Llama 3 8B 텍스트 인코더 방식. 기본 stream은 층을 하나씩 읽어 RAM 1~2 GB로 돌고,
         # cpu/cuda/auto는 모델 전체(약 16 GB)를 올린다. 어느 쪽이든 같은 프롬프트는 캐시를 쓴다.
@@ -1002,8 +1028,8 @@ class Panel:
         # 상주 워커에 요청한다(kimodo_generate.py CLI와 같은 설정: 샘플 1개, 후처리 끔, 표준 T포즈 BVH).
         worker = self.ensure_worker()
         done = folder / "Kimodo.done.json"
-        worker.submit({"prompt": prompt, "duration": duration, "seed": self.job["seed"], "output": str(folder / "SOMA"),
-                       "log": str(folder / "Kimodo.log"), "done": str(done)})
+        worker.submit({"prompt": prompt, "duration": duration, "seed": self.job["seed"], "steps": self.job["steps"],
+                       "output": str(folder / "SOMA"), "log": str(folder / "Kimodo.log"), "done": str(done)})
         self.process = WorkerTask(worker, done)
         self.message = f"Generating {duration:g}s in Kimodo…"
 
@@ -1115,7 +1141,7 @@ class Panel:
             request = f"{self.job['base_prompt']} → {request}"
         self.add_take(clip, cleanup_path(clip, staging), prompt=request, english=self.english_prompt,
                       interpretation=self.interpretation, motion=self.job["motion"],
-                      seed=self.job["seed"], target=target.get_name(), cached=cached, source={
+                      seed=self.job["seed"], steps=self.job["steps"], target=target.get_name(), cached=cached, source={
                           "glb": str(self.job["folder"] / "SOMA_Motion.glb"),
                           "target_mesh": self.job["target_mesh_path"] or target.get_path_name(),
                           "target_rig": self.job["target_rig_path"],
@@ -1133,7 +1159,8 @@ class Panel:
         self.job = None
         # dispatch()가 "Preview ready"로 시작하는지로 성공 알림을 판단하므로 접두어를 유지한다.
         count = f"{batch['total']} takes · " if batch.get("total", 1) > 1 else ""
-        self.message = f"Preview ready · {count}{clip.get_play_length():.2f}s · seed {self.seed} · {label}"
+        self.message = (f"Preview ready · {count}{clip.get_play_length():.2f}s · seed {self.seed}"
+                        f"{steps_label(self.selected_take())} · {label}")
 
     def batch_label(self):
         """Generate ×N 진행 중이면 "Take 2/5", 아니면 빈 문자열."""

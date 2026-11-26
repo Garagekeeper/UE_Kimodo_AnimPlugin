@@ -102,6 +102,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Generation")
 	bool bRootMotion = false;
 
+	/** 확산(디노이징) 스텝 수. Kimodo 기본 100. 적을수록 빠르고 거칠며, 같은 시드라도 스텝이 다르면 다른 동작이 나온다. */
+	UPROPERTY(Config, EditAnywhere, Category = "Generation", meta = (ClampMin = "1", ClampMax = "1000", UIMin = "1", UIMax = "200"))
+	int32 DiffusionSteps = 100;
+
 	/** 패널에서 마지막으로 고른 값. 다음에 패널을 열 때 프로젝트 기본값보다 먼저 쓴다(설정 화면에는 표시하지 않음). */
 	UPROPERTY(Config)
 	FString LastTargetMesh;

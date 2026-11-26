@@ -159,6 +159,9 @@ class FakeWorker:
     def loaded(self):
         return True
 
+    def submit(self, request):
+        self.requests = getattr(self, "requests", []) + [request]
+
     def stop(self):
         self.stopped = True
 
@@ -233,6 +236,16 @@ class ResidentWorker(unittest.TestCase):
         worker.log_path.write_text("Using device: cuda:0\n", encoding="utf-8")
         self.assertEqual(p.progress()[0], panel.STAGE_LOADING_MODEL)
 
+    def test_generate_sends_steps_to_the_worker(self):
+        p = new_panel()
+        folder = Path(tempfile.mkdtemp())
+        (folder / "interpretation.json").write_text('{"english": "A person waves.", "korean": ""}', encoding="utf-8")
+        p.job = dict(self.job(), folder=folder, duration=4.0, seed=42, steps=20, stage="Interpretation")
+        p.generate()
+        request = p.worker.requests[-1]
+        self.assertEqual((request["seed"], request["steps"], request["duration"]), (42, 20, 4.0))
+        self.assertEqual(request["prompt"], "A person waves")
+
     def test_cancel_remembers_the_abandoned_request(self):
         p = new_panel()
         p.job = self.job()
@@ -280,6 +293,13 @@ class Helpers(unittest.TestCase):
         self.assertEqual(panel.save_folder_of({"save_folder": "", "output_folder": "/Game/X"}), "/Game/X")
         self.assertEqual(panel.save_folder_of({"save_folder": "bad path"}), "")
         self.assertEqual(panel.selected_agents({"agents": [" Claude", "unknown", "claude", "codex"]}), ["claude", "codex"])
+
+    def test_steps_parsing_and_labels(self):
+        self.assertEqual([panel.parse_steps(v) for v in (None, "", "abc", "20", 0, 5000, 100)], [100, 100, 100, 20, 1, 1000, 100])
+        take = {"number": 4, "duration": 4.0, "seed": 42, "steps": 20}
+        self.assertEqual(panel.take_summary(take), "Take #4 · 4.00s · seed 42 · 20 steps")
+        self.assertEqual(panel.take_summary(dict(take, steps=100)), "Take #4 · 4.00s · seed 42")
+        self.assertEqual(panel.take_summary(dict(take, steps=None)), "Take #4 · 4.00s · seed 42")
 
     def test_clean_text_strips_ansi(self):
         self.assertEqual(panel.clean_text("\x1b[32mok\x1b[0m\tdone\n"), "okdone\n")
