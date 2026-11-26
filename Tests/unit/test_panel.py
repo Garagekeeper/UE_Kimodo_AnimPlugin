@@ -246,6 +246,54 @@ class ResidentWorker(unittest.TestCase):
         self.assertEqual((request["seed"], request["steps"], request["duration"]), (42, 20, 4.0))
         self.assertEqual(request["prompt"], "A person waves")
 
+    def keyed_panel(self, npz=True):
+        p = new_panel()
+        job = Path(tempfile.mkdtemp())
+        if npz:
+            (job / "SOMA.npz").write_bytes(b"x")
+        take = p.add_take(MagicMock(), "dir", prompt="wave", english="A person waves", seed=4, steps=20, seconds=4.0,
+                          duration=3.97, source={"glb": str(job / "SOMA_Motion.glb")})
+        started = {}
+        p.start = lambda prompt, duration, revision, config, hand_keys=None, label="": started.update(
+            prompt=prompt, duration=duration, config=config, hand_keys=hand_keys, label=label)
+        return p, take, job, started
+
+    def test_keyed_uses_the_take_and_sends_keys(self):
+        p, take, job, started = self.keyed_panel()
+        p.start_keyed({"hand_keys": [{"time": 0.9, "hand": "right", "offset": [30, 5, 0]},
+                                     {"time": 1.5, "hand": "L", "offset": [-30, 0, 10]}], "steps": 100})
+        self.assertEqual((started["prompt"], started["duration"]), ("A person waves", "4.0"))
+        self.assertEqual((started["config"]["seed"], started["config"]["count"], started["config"]["steps"]), ("4", 1, 20))
+        self.assertEqual(started["hand_keys"]["base"], str(job / "SOMA.npz"))
+        self.assertEqual(started["hand_keys"]["keys"], [
+            {"time": 1.5, "hand": "left", "offset": [-0.3, 0.0, 0.1]},
+            {"time": 0.9, "hand": "right", "offset": [0.3, 0.05, 0.0]}])
+        self.assertIn("2 hand keys", started["label"])
+
+    def test_keyed_errors(self):
+        p, take, job, _ = self.keyed_panel()
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            p.start_keyed({"hand_keys": []})
+        with self.assertRaisesRegex(ValueError, "inside the take"):
+            p.start_keyed({"hand_keys": [{"time": 4.0, "offset": [0, 0, 0]}]})
+        with self.assertRaisesRegex(ValueError, "at most"):
+            p.start_keyed({"hand_keys": [{"time": i * 0.1, "offset": [0, 0, 0]} for i in range(20)]})
+        p2, _, _, _ = self.keyed_panel(npz=False)
+        with self.assertRaisesRegex(FileNotFoundError, "no Kimodo motion file"):
+            p2.start_keyed({"hand_keys": [{"time": 1.0, "offset": [0, 0, 0]}]})
+        p3 = new_panel()
+        with self.assertRaisesRegex(ValueError, "Select the take"):
+            p3.start_keyed({"hand_keys": [{"time": 1.0, "offset": [0, 0, 0]}]})
+
+    def test_generate_sends_hand_keys_to_the_worker(self):
+        p = new_panel()
+        folder = Path(tempfile.mkdtemp())
+        (folder / "interpretation.json").write_text('{"english": "A person waves.", "korean": ""}', encoding="utf-8")
+        keys = {"base": "x.npz", "keys": [{"time": 1.0, "hand": "right", "offset": [0.3, 0, 0]}]}
+        p.job = dict(self.job(), folder=folder, duration=4.0, seed=4, steps=100, stage="Interpretation", hand_keys=keys)
+        p.generate()
+        self.assertEqual(p.worker.requests[-1]["hand_keys"], keys)
+
     def test_cancel_remembers_the_abandoned_request(self):
         p = new_panel()
         p.job = self.job()

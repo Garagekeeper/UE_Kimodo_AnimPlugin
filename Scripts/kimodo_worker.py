@@ -42,6 +42,50 @@ def write_done(path, result):
     os.replace(temp, path)
 
 
+def hand_constraints(model, device, spec, total_frames):
+    """손 키프레임 → Kimodo 손 제약(left-hand / right-hand).
+
+    spec: {"base": <기준 테이크의 Kimodo 결과 .npz>, "keys": [{"time": 초, "hand": "right"|"left",
+           "offset": [오른쪽, 위, 앞] (m, 캐릭터 기준)}]}
+    기준 테이크의 그 프레임 전신 자세에서 손만 offset만큼 옮긴 위치·회전을 제약으로 건다.
+    Kimodo는 프롬프트별로 제약을 잘라(crop_move) 인덱스 텐서를 CPU에 새로 만들고, 조건 생성은 인덱스만 모델 장치로
+    옮기므로 인덱스는 CPU, 값 텐서는 모델 장치에 둔다(kimodo CLI의 제약 파일 경로와 같은 배치)."""
+    if not spec or not spec.get("keys"):
+        return []
+    import numpy as np
+    from kimodo.constraints import (LeftHandConstraintSet, RightHandConstraintSet,
+                                    _convert_constraint_local_rots_to_skeleton)
+    from kimodo.skeleton import SOMASkeleton30
+
+    base = np.load(spec["base"])
+    skeleton = SOMASkeleton30()
+    constraints = []
+    for hand, cls in (("right", RightHandConstraintSet), ("left", LeftHandConstraintSet)):
+        keys = sorted((k for k in spec["keys"] if k.get("hand", "right") == hand), key=lambda k: float(k["time"]))
+        frames = sorted({min(total_frames - 1, max(0, round(float(k["time"]) * model.fps))) for k in keys})
+        if not frames:
+            continue
+        index = torch.tensor(frames)
+        local = _convert_constraint_local_rots_to_skeleton(torch.from_numpy(base["local_rot_mats"][frames]), skeleton)
+        rots, positions, _ = skeleton.fk(local, torch.from_numpy(base["root_positions"][frames]))
+        constraint = cls(skeleton, frame_indices=index, global_joints_positions=positions, global_joints_rots=rots,
+                         smooth_root_2d=torch.from_numpy(base["smooth_root_pos"][frames][:, [0, 2]]))
+        heading = base["global_root_heading"][frames]  # (cos, sin) — 정면 +z를 이만큼 돌린 방향
+        offsets = {min(total_frames - 1, max(0, round(float(k["time"]) * model.fps))): k.get("offset", [0, 0, 0])
+                   for k in keys}
+        for row, frame in enumerate(frames):
+            right, up, forward = (float(v) for v in offsets[frame])
+            cos, sin = float(heading[row, 0]), float(heading[row, 1])
+            delta = torch.tensor([-cos * right + sin * forward, up, sin * right + cos * forward], dtype=positions.dtype)
+            constraint.global_joints_positions[row, constraint.pos_indices] += delta
+        constraint.root_y_pos = constraint.global_joints_positions[:, skeleton.root_idx, 1]
+        for name in ("global_joints_positions", "global_joints_rots", "smooth_root_2d", "root_y_pos", "global_root_heading"):
+            setattr(constraint, name, getattr(constraint, name).to(device))
+        constraints.append(constraint)
+        print(f"Hand keys ({hand}): frames {frames}")
+    return constraints
+
+
 def generate(model, device, request):
     """kimodo.scripts.generate.main()의 단일 샘플·BVH 경로와 같은 순서로 생성한다(같은 시드면 같은 결과)."""
     texts, num_frames = get_texts_and_num_frames_from_prompt(request["prompt"], str(request["duration"]), model.fps)
@@ -49,9 +93,10 @@ def generate(model, device, request):
     print("Will generate motions with the following prompts")
     for text, frames in zip(texts, num_frames):
         print(f"    '{text}' with {frames} frames")
+    constraints = hand_constraints(model, device, request.get("hand_keys"), sum(num_frames))
     seed_everything(int(request["seed"]))
     output = model(
-        texts, num_frames, constraint_lst=[], num_denoising_steps=int(request.get("steps") or 100), num_samples=1,
+        texts, num_frames, constraint_lst=constraints, num_denoising_steps=int(request.get("steps") or 100), num_samples=1,
         multi_prompt=True,
         num_transition_frames=5, post_processing=False, return_numpy=True,
     )

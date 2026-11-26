@@ -486,6 +486,30 @@ def steps_label(take):
     return f" · {steps} steps" if steps and steps != DEFAULT_STEPS else ""
 
 
+MAX_HAND_KEYS = 19  # Kimodo 권장: 제약 종류별 키프레임 20개 미만
+
+
+def parse_hand_keys(value):
+    """C++ 패널의 손 키프레임 목록 → [{"time": 초, "hand": "right"|"left", "offset": [오른쪽, 위, 앞] (m)}].
+    패널은 offset을 cm로 보낸다. 같은 손·같은 프레임에 두 개면 나중 것만 쓰도록 워커가 정리한다."""
+    keys = []
+    for item in value or []:
+        try:
+            time_s = float(item.get("time", 0))
+            offset = [float(v) / 100.0 for v in (item.get("offset") or [0, 0, 0])][:3]
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not math.isfinite(time_s) or time_s < 0 or len(offset) != 3 or not all(map(math.isfinite, offset)):
+            continue
+        hand = "left" if str(item.get("hand", "right")).lower().startswith("l") else "right"
+        keys.append({"time": round(time_s, 3), "hand": hand, "offset": offset})
+    keys.sort(key=lambda k: (k["hand"], k["time"]))
+    for hand in ("right", "left"):
+        if sum(1 for k in keys if k["hand"] == hand) > MAX_HAND_KEYS:
+            raise ValueError(f"Use at most {MAX_HAND_KEYS} keys per hand (Kimodo works best with fewer than 20).")
+    return keys
+
+
 def take_summary(take):
     return f"Take #{take['number']} · {take['duration']:.2f}s · seed {take['seed']}{steps_label(take)}"
 
@@ -564,6 +588,8 @@ class Panel:
             "source": None, "cached": "", "used": 0,
             # 확산 스텝. 1.1.1 이전 테이크는 기록이 없다(None = 당시 기본 100).
             "steps": None,
+            # 요청한 길이(초)와 이 테이크를 만들 때 쓴 손 키프레임(재현·기준 테이크용)
+            "seconds": None, "hand_keys": [],
         }
         take.update(info)
         return take
@@ -710,7 +736,7 @@ class Panel:
             "interpretation": take["interpretation"], "motion": take["motion"], "seed": take["seed"],
             "duration": take["duration"], "starred": take["starred"], "saved": take["saved"],
             "target": take["target"], "source": take.get("source"), "cached": take.get("cached", ""),
-            "steps": take.get("steps"),
+            "steps": take.get("steps"), "seconds": take.get("seconds"), "hand_keys": take.get("hand_keys") or [],
         }
 
     def persist_session(self):
@@ -837,7 +863,8 @@ class Panel:
                 interpretation=entry.get("interpretation", ""), motion=entry.get("motion", ""),
                 seed=entry.get("seed"), duration=entry.get("duration") or 0.0, starred=bool(entry.get("starred")),
                 saved=entry.get("saved", ""), target=entry.get("target", ""), source=entry.get("source"),
-                cached=entry.get("cached", ""), steps=entry.get("steps")))
+                cached=entry.get("cached", ""), steps=entry.get("steps"), seconds=entry.get("seconds"),
+                hand_keys=entry.get("hand_keys") or []))
         # 이전 세션 테이크를 앞(오래된 쪽)에 두고, 그사이 새로 만든 테이크를 뒤에 둔다.
         current = self.takes
         # 이전 버전에서 복원 전에 만든 테이크는 번호가 겹칠 수 있다(저장된 목록에 이미 겹쳐 있을 수도 있음).
@@ -875,7 +902,35 @@ class Panel:
         if failed:
             self.message += f" ({failed} could not be restored; see the Output Log)"
 
-    def start(self, prompt, duration_text, revision, config):
+    def start_keyed(self, config):
+        """Hand keys: 고른 테이크를 기준으로 손을 키프레임 위치로 옮겨 다시 생성한다.
+
+        같은 프롬프트(Kimodo에 실제로 보낸 영어)·시드·길이·스텝을 쓰고, 기준 테이크의 그 시각 자세에서 손만 offset(cm)만큼
+        옮긴 위치를 Kimodo 손 제약으로 건다. 결과는 새 테이크로 추가된다."""
+        if self.process is not None:
+            return
+        take = self.selected_take()
+        if take is None:
+            raise ValueError("Select the take to use as the base for hand keys.")
+        keys = parse_hand_keys(config.get("hand_keys"))
+        if not keys:
+            raise ValueError("Add at least one hand key.")
+        glb = (take.get("source") or {}).get("glb") or ""
+        base = Path(glb).with_name("SOMA.npz") if glb else None
+        if base is None or not base.is_file():
+            raise FileNotFoundError(f"Take #{take['number']} has no Kimodo motion file to use as the base "
+                                    "(it was made by an older version or its job folder was removed). Generate it again.")
+        seconds = take.get("seconds") or math.ceil(take["duration"] * 10 - 1e-6) / 10
+        late = [f"{k['time']:g}s" for k in keys if k["time"] >= seconds]
+        if late:
+            raise ValueError(f"Hand keys must be inside the take ({seconds:g}s): {', '.join(late)}")
+        prompt = take.get("english") or take.get("prompt") or ""
+        keyed = dict(config, seed=str(take["seed"]), count=1, agents=[],
+                     steps=take.get("steps") or config.get("steps"))
+        self.start(prompt, str(seconds), False, keyed, hand_keys={"base": str(base), "keys": keys},
+                   label=f"{take.get('prompt') or prompt} → {len(keys)} hand key{'s' if len(keys) != 1 else ''}")
+
+    def start(self, prompt, duration_text, revision, config, hand_keys=None, label=""):
         if self.process is not None:
             return
         prompt = prompt.strip()
@@ -949,6 +1004,8 @@ class Panel:
             "base_prompt": (self.selected_take() or {}).get("prompt", "") if revision else "",
             "batch": {"index": 1, "total": count, "fixed_seed": bool(seed_text), "base_seed": seed},
             "steps": steps,
+            # 손 키프레임 제약({"base": 기준 .npz, "keys": [...]})과 테이크 목록에 보일 이름
+            "hand_keys": hand_keys, "label": label,
         }
         # Llama 3 8B 텍스트 인코더 방식. 기본 stream은 층을 하나씩 읽어 RAM 1~2 GB로 돌고,
         # cpu/cuda/auto는 모델 전체(약 16 GB)를 올린다. 어느 쪽이든 같은 프롬프트는 캐시를 쓴다.
@@ -1029,6 +1086,7 @@ class Panel:
         worker = self.ensure_worker()
         done = folder / "Kimodo.done.json"
         worker.submit({"prompt": prompt, "duration": duration, "seed": self.job["seed"], "steps": self.job["steps"],
+                       "hand_keys": self.job.get("hand_keys"),
                        "output": str(folder / "SOMA"), "log": str(folder / "Kimodo.log"), "done": str(done)})
         self.process = WorkerTask(worker, done)
         self.message = f"Generating {duration:g}s in Kimodo…"
@@ -1139,9 +1197,12 @@ class Panel:
         request = self.job["request"]
         if self.job["base_prompt"]:
             request = f"{self.job['base_prompt']} → {request}"
+        request = self.job.get("label") or request
+        hand_keys = (self.job.get("hand_keys") or {}).get("keys") or []
         self.add_take(clip, cleanup_path(clip, staging), prompt=request, english=self.english_prompt,
                       interpretation=self.interpretation, motion=self.job["motion"],
-                      seed=self.job["seed"], steps=self.job["steps"], target=target.get_name(), cached=cached, source={
+                      seed=self.job["seed"], steps=self.job["steps"], seconds=self.job["duration"], hand_keys=hand_keys,
+                      target=target.get_name(), cached=cached, source={
                           "glb": str(self.job["folder"] / "SOMA_Motion.glb"),
                           "target_mesh": self.job["target_mesh_path"] or target.get_path_name(),
                           "target_rig": self.job["target_rig_path"],
@@ -1345,6 +1406,8 @@ def dispatch(encoded_payload):
             was_working = False
         elif action == "setup":
             panel.start_setup(payload, value)
+        elif action == "keyed":
+            panel.start_keyed(payload)
         elif action == "select":
             panel.select_take(value, payload)
         elif action == "star":

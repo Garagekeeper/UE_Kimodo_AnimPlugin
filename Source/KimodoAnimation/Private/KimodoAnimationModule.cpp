@@ -169,6 +169,16 @@ const FEncoderOption& GetEncoderOption(EKimodoTextEncoderDevice Value)
 	return GetEncoderOptions()[0];
 }
 
+/** 손 키프레임 한 개: 시각(초), 왼손 여부, 캐릭터 기준 오프셋(cm: 오른쪽, 위, 앞). */
+struct FHandKey
+{
+	float Time = 0.0f;
+	bool bLeft = false;
+	float Right = 0.0f;
+	float Up = 0.0f;
+	float Forward = 0.0f;
+};
+
 /** 패널의 테이크 목록 한 줄. Python 상태(JSON)의 takes 항목을 그대로 옮긴다. */
 struct FKimodoTake
 {
@@ -270,6 +280,7 @@ public:
 		Preview->SetFollowBone(Settings->PreviewFollowBone);
 		Status = LOCTEXT("WaitingForPython", "Waiting for Unreal Python…");
 		RegisterActiveTimer(0.5f, FWidgetActiveTimerDelegate::CreateSP(this, &SKimodoPanel::Poll));
+		RebuildHandKeyRows();
 	}
 
 	/** Ctrl+Enter는 패널 어디에 포커스가 있어도 생성한다(프롬프트 칸 안에서도). */
@@ -735,7 +746,178 @@ private:
 						return RunAction(TEXT("revise"), Revision->GetText().ToString(), Duration->GetText().ToString());
 					})
 				]
+			]
+			// 손 키프레임: 고른 테이크를 기준으로 손 위치를 정해 다시 생성(Kimodo 손 제약).
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 0)
+			[
+				MakeHandKeysArea()
 			];
+	}
+
+	/** Hand keys: 시각·손·오프셋(cm, 캐릭터 기준 오른쪽/위/앞) 목록과 생성 버튼. 기본은 접혀 있다. */
+	TSharedRef<SWidget> MakeHandKeysArea()
+	{
+		return SNew(SExpandableArea)
+			.AreaTitle(LOCTEXT("HandKeys", "Hand keys"))
+			.InitiallyCollapsed(true)
+			.AllowAnimatedTransition(false)
+			.Visibility_Lambda([this] { return bCanRevise ? EVisibility::Visible : EVisibility::Collapsed; })
+			.Padding(FMargin(0, 6, 0, 0))
+			.BodyContent()
+			[
+				SNew(SVerticalBox)
+				.IsEnabled_Lambda([this] { return !bBusy; })
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
+				[
+					SNew(STextBlock)
+					.AutoWrapText(true)
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					.Text(LOCTEXT("HandKeysHelp", "Move a hand at given times, relative to the selected take's pose (cm: right / up / forward from the character). "
+						"Generate with keys keeps the take's prompt, seed, length and steps and adds a new take. Fewer than 20 keys per hand work best."))
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SAssignNew(HandKeyRows, SVerticalBox)
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 0)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("AddHandKey", "+ Key at playhead"))
+						.ToolTipText(LOCTEXT("AddHandKeyTip", "Add a right-hand key at the preview's current time (pause the preview where you want it)."))
+						.OnClicked_Lambda([this] {
+							HandKeys.Add({ FMath::RoundToFloat(Preview->GetTime() * 10.0f) / 10.0f, false, 0.0f, 0.0f, 0.0f });
+							RebuildHandKeyRows();
+							return FReply::Handled();
+						})
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("WavePreset", "Big wave preset"))
+						.ToolTipText(LOCTEXT("WavePresetTip", "Fill keys for a big, slow hello wave: the right hand swings 30 cm left and right every 0.6 s.\nWorks best on a take where the right hand is already raised."))
+						.OnClicked_Lambda([this] {
+							HandKeys.Reset();
+							const TSharedPtr<FKimodoTake> Take = GetSelectedTake();
+							const float Length = Take.IsValid() ? FMath::Max(Take->Duration, 1.5f) : 4.0f;
+							int32 Index = 0;
+							for (float Time = 0.9f; Time < Length - 0.35f && Index < 19; Time += 0.6f, ++Index)
+							{
+								HandKeys.Add({ FMath::RoundToFloat(Time * 10.0f) / 10.0f, false, Index % 2 == 0 ? 30.0f : -30.0f, 5.0f, 0.0f });
+							}
+							RebuildHandKeyRows();
+							return FReply::Handled();
+						})
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("ClearHandKeys", "Clear"))
+						.IsEnabled_Lambda([this] { return HandKeys.Num() > 0; })
+						.OnClicked_Lambda([this] {
+							HandKeys.Reset();
+							RebuildHandKeyRows();
+							return FReply::Handled();
+						})
+					]
+					+ SHorizontalBox::Slot().FillWidth(1)
+					[
+						SNullWidget::NullWidget
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(SButton)
+						.Text_Lambda([this] {
+							const TSharedPtr<FKimodoTake> Take = GetSelectedTake();
+							return Take.IsValid()
+								? FText::Format(LOCTEXT("GenerateKeyed", "Generate with keys (#{0})"), FText::AsNumber(Take->Number))
+								: LOCTEXT("GenerateKeyedNone", "Generate with keys");
+						})
+						.ToolTipText(LOCTEXT("GenerateKeyedTip", "Regenerate the selected take with these hand keys. The result is added as a new take."))
+						.IsEnabled_Lambda([this] {
+							return !bBusy && IsReady() && bCanRevise && GetSelectedTake().IsValid() && HandKeys.Num() > 0 && !TargetMeshPath.IsEmpty();
+						})
+						.OnClicked_Lambda([this] { return RunAction(TEXT("keyed")); })
+					]
+				]
+			];
+	}
+
+	/** 손 키프레임 한 줄씩 다시 그린다(추가·삭제·프리셋 때). 값은 칸에서 바로 HandKeys에 반영한다. */
+	void RebuildHandKeyRows()
+	{
+		if (!HandKeyRows.IsValid()) return;
+		HandKeyRows->ClearChildren();
+		if (HandKeys.IsEmpty())
+		{
+			HandKeyRows->AddSlot().AutoHeight()
+			[
+				SNew(STextBlock).Text(LOCTEXT("NoHandKeys", "No keys yet.")).ColorAndOpacity(FSlateColor::UseSubduedForeground())
+			];
+			return;
+		}
+		auto Number = [this](int32 Index, float FHandKey::* Field, float Min, float Max, const FText& Tip) -> TSharedRef<SWidget>
+		{
+			return SNew(SBox).WidthOverride(72)
+			[
+				SNew(SSpinBox<float>)
+				.MinValue(Min).MaxValue(Max).Delta(Field == &FHandKey::Time ? 0.1f : 1.0f)
+				.ToolTipText(Tip)
+				.Value_Lambda([this, Index, Field] { return HandKeys.IsValidIndex(Index) ? HandKeys[Index].*Field : 0.0f; })
+				.OnValueChanged_Lambda([this, Index, Field](float Value) { if (HandKeys.IsValidIndex(Index)) HandKeys[Index].*Field = Value; })
+			];
+		};
+		for (int32 Index = 0; Index < HandKeys.Num(); ++Index)
+		{
+			HandKeyRows->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+				[
+					Number(Index, &FHandKey::Time, 0.0f, 60.0f, LOCTEXT("KeyTimeTip", "Time in seconds"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("KeySeconds", "s"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+				[
+					SNew(SSegmentedControl<bool>)
+					.Value_Lambda([this, Index] { return HandKeys.IsValidIndex(Index) && HandKeys[Index].bLeft; })
+					.OnValueChanged_Lambda([this, Index](bool bLeft) { if (HandKeys.IsValidIndex(Index)) HandKeys[Index].bLeft = bLeft; })
+					+ SSegmentedControl<bool>::Slot(false).Text(LOCTEXT("RightHand", "R"))
+					+ SSegmentedControl<bool>::Slot(true).Text(LOCTEXT("LeftHand", "L"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+				[
+					Number(Index, &FHandKey::Right, -100.0f, 100.0f, LOCTEXT("KeyRightTip", "cm to the character's right (negative = left)"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+				[
+					Number(Index, &FHandKey::Up, -100.0f, 100.0f, LOCTEXT("KeyUpTip", "cm up (negative = down)"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+				[
+					Number(Index, &FHandKey::Forward, -100.0f, 100.0f, LOCTEXT("KeyForwardTip", "cm forward from the character (negative = back)"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(SButton)
+					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+					.ToolTipText(LOCTEXT("RemoveHandKey", "Remove this key"))
+					.OnClicked_Lambda([this, Index] {
+						if (HandKeys.IsValidIndex(Index)) HandKeys.RemoveAt(Index);
+						RebuildHandKeyRows();
+						return FReply::Handled();
+					})
+					[
+						SNew(SImage).Image(FAppStyle::GetBrush("Icons.X")).ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					]
+				]
+			];
+		}
 	}
 
 	TSharedRef<ITableRow> MakeTakeRow(TSharedPtr<FKimodoTake> Item, const TSharedRef<STableViewBase>& Owner)
@@ -1180,6 +1362,21 @@ private:
 		Payload->SetBoolField(TEXT("root_motion"), UserSettings->bRootMotion);
 		Payload->SetNumberField(TEXT("count"), GetBatchCount());
 		Payload->SetNumberField(TEXT("steps"), GetDiffusionSteps());
+		// 손 키프레임(cm). Python(parse_hand_keys)이 m로 바꾸고 검사한다.
+		TArray<TSharedPtr<FJsonValue>> Keys;
+		for (const FHandKey& Key : HandKeys)
+		{
+			TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+			Item->SetNumberField(TEXT("time"), Key.Time);
+			Item->SetStringField(TEXT("hand"), Key.bLeft ? TEXT("left") : TEXT("right"));
+			TArray<TSharedPtr<FJsonValue>> Offset;
+			Offset.Add(MakeShared<FJsonValueNumber>(Key.Right));
+			Offset.Add(MakeShared<FJsonValueNumber>(Key.Up));
+			Offset.Add(MakeShared<FJsonValueNumber>(Key.Forward));
+			Item->SetArrayField(TEXT("offset"), Offset);
+			Keys.Add(MakeShared<FJsonValueObject>(Item));
+		}
+		Payload->SetArrayField(TEXT("hand_keys"), Keys);
 		Payload->SetStringField(TEXT("python"), ResolveLocalPath(TEXT("KIMODO_PYTHON"), TEXT("ECLIPSE_KIMODO_PYTHON"), UserSettings->PythonExecutable.FilePath, GetManagedPython()));
 		Payload->SetStringField(TEXT("model_cache"), ResolveLocalPath(TEXT("KIMODO_MODEL_CACHE"), TEXT("ECLIPSE_KIMODO_MODEL_CACHE"), UserSettings->ModelCacheDirectory.Path, GetManagedInstallRoot() / TEXT("model-cache")));
 		Payload->SetStringField(TEXT("bootstrap_python"), GetBootstrapPython());
@@ -1491,6 +1688,9 @@ private:
 	TSharedPtr<SEditableTextBox> Duration;
 	TSharedPtr<SEditableTextBox> Seed;
 	TSharedPtr<SEditableTextBox> Revision;
+	/** 손 키프레임 목록과 그 줄들을 담는 상자(Hand keys). */
+	TArray<FHandKey> HandKeys;
+	TSharedPtr<SVerticalBox> HandKeyRows;
 	TSharedPtr<SEditableTextBox> AssetName;
 	TSharedPtr<SEditableTextBox> SaveFolder;
 	TSharedPtr<SComboButton> FolderPicker;

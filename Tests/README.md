@@ -13,8 +13,8 @@ powershell -ExecutionPolicy Bypass -File Tests\run_tests.ps1 -Editor -Only take_
 | 단계 | 폴더 | 필요한 것 | 확인하는 것 |
 |---|---|---|---|
 | unit | `unit/` | Python 3.11 아무거나(`unreal`은 가짜로 대체) | 테이크 번호·정렬·중복 정리, ×N 큐(시드·라벨·작업 폴더), 상주 워커 재사용·유휴 해제·Cancel·패널 닫기, WorkerTask 결과 판정, 삭제 후 상태 줄, 이름 생성, 진행률 파싱, Revise 문장 합치기 |
-| integration | `integration/` | Kimodo 설치(venv + 모델) | `kimodo_worker.py`가 같은 시드에서 `kimodo_generate.py` CLI와 BVH 바이트 동일, 상주 요청이 CLI보다 빠름, stdin이 닫히면 종료 |
-| editor | `editor/` | Kimodo 설치 + `SKM_Manny_Simple`이 있는 프로젝트(기본 KimodoTest, 그 에디터는 닫아 둠) | 실제 생성 → ×2, 선택·별표·저장·Revise·삭제 / 워커 수명 / 루트 모션 켬·끔 / 테이크 캐시·재시작 후 복원·번호 |
+| integration | `integration/` | Kimodo 설치(venv + 모델) | `kimodo_worker.py`가 같은 시드(100·20 스텝)에서 `kimodo_generate.py` CLI와 BVH 바이트 동일, 상주 요청이 CLI보다 빠름, stdin이 닫히면 종료 / 손 키프레임: 키 시각에 손이 목표 10 cm 안, "+오른쪽"이 캐릭터 오른쪽 |
+| editor | `editor/` | Kimodo 설치 + `SKM_Manny_Simple`이 있는 프로젝트(기본 KimodoTest, 그 에디터는 닫아 둠) | 실제 생성 → ×2, 선택·별표·저장·Revise·삭제 / 워커 수명 / 루트 모션 켬·끔 / 테이크 캐시·재시작 후 복원·번호 / 손 키프레임으로 새 테이크 |
 
 에디터 테스트는 `UnrealEditor-Cmd -run=pythonscript`로 테스트마다 에디터를 한 번 띄웁니다. 각 테스트는 `/Game/KimodoTest_<이름>` 폴더와 임시 작업 폴더만 쓰고 끝나면 지웁니다. 결과는 `%TEMP%\kimodo_editor_tests_*.jsonl`에 남습니다.
 
