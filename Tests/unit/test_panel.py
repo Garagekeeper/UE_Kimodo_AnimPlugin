@@ -107,6 +107,29 @@ class RemoveTake(unittest.TestCase):
         self.assertEqual(p.message, panel.IDLE_MESSAGE)
 
 
+class TakeKeys(unittest.TestCase):
+    def test_keys_shown_per_take_and_saved_in_session(self):
+        p = new_panel()
+        used = [{"time": 0.5, "bone": "left_hand", "offset": [0.1, 0.2, -0.05]}]
+        keyed = p.add_take(MagicMock(), "dir-a", prompt="wave", hand_keys=used)
+        plain = p.add_take(MagicMock(), "dir-b", prompt="walk")
+        # 만들 때 쓴 키(m)를 패널 형식(cm)으로 보여 주고, 키 없이 만든 테이크는 빈 목록
+        self.assertEqual(panel.panel_keys(keyed), [{"time": 0.5, "bone": "left_hand", "offset": [10.0, 20.0, -5.0]}])
+        self.assertEqual(panel.panel_keys(plain), [])
+        # 예전("hand" 필드) 테이크와 깨진 항목도 목록을 막지 않는다
+        old = p.add_take(MagicMock(), "dir-c", hand_keys=[{"time": 1.0, "hand": "left", "offset": [0, 0.1, 0]}, {"time": 2.0}])
+        self.assertEqual(panel.panel_keys(old), [{"time": 1.0, "bone": "left_hand", "offset": [0.0, 10.0, 0.0]}])
+        # 편집한 키는 그 테이크에만 남고, 읽을 수 없는 항목은 버린다
+        p.set_take_keys(plain["id"], [{"time": 1.2, "bone": "hips", "offset": [0, -20, 0]},
+                                      {"time": "x", "bone": "hips", "offset": [0, 0, 0]}])
+        self.assertEqual(panel.panel_keys(plain), [{"time": 1.2, "bone": "hips", "offset": [0.0, -20.0, 0.0]}])
+        self.assertEqual(panel.panel_keys(keyed)[0]["bone"], "left_hand")
+        # 비운 목록도 "편집함"으로 남는다(만들 때 쓴 키로 돌아가지 않음)
+        p.set_take_keys(keyed["id"], [])
+        self.assertEqual(panel.panel_keys(keyed), [])
+        self.assertEqual(panel.Panel.take_entry(plain)["edit_keys"], panel.panel_keys(plain))
+
+
 class Batch(unittest.TestCase):
     def run_batch(self, fixed):
         p = new_panel()

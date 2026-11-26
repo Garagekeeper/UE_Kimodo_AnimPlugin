@@ -38,6 +38,10 @@
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SSegmentedControl.h"
 #include "Widgets/Input/SSpinBox.h"
+#include "Widgets/SLeafWidget.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Rendering/DrawElements.h"
+#include "Styling/CoreStyle.h"
 #include "Widgets/Input/SSlider.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Images/SThrobber.h"
@@ -177,6 +181,275 @@ struct FHandKey
 	float Right = 0.0f;
 	float Up = 0.0f;
 	float Forward = 0.0f;
+
+	bool operator==(const FHandKey& Other) const
+	{
+		return Time == Other.Time && Bone == Other.Bone && Right == Other.Right && Up == Other.Up && Forward == Other.Forward;
+	}
+};
+
+static const TCHAR* const KeyBoneNames[] = { TEXT("right_hand"), TEXT("left_hand"), TEXT("right_foot"), TEXT("left_foot"), TEXT("hips") };
+
+/** Body keys → JSON(패널 형식: time 초, bone 이름, offset [오른쪽, 위, 앞] cm). */
+TArray<TSharedPtr<FJsonValue>> HandKeysToJson(const TArray<FHandKey>& InKeys)
+{
+	TArray<TSharedPtr<FJsonValue>> Keys;
+	for (const FHandKey& Key : InKeys)
+	{
+		TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetNumberField(TEXT("time"), Key.Time);
+		Item->SetStringField(TEXT("bone"), KeyBoneNames[FMath::Clamp(static_cast<int32>(Key.Bone), 0, 4)]);
+		TArray<TSharedPtr<FJsonValue>> Offset;
+		Offset.Add(MakeShared<FJsonValueNumber>(Key.Right));
+		Offset.Add(MakeShared<FJsonValueNumber>(Key.Up));
+		Offset.Add(MakeShared<FJsonValueNumber>(Key.Forward));
+		Item->SetArrayField(TEXT("offset"), Offset);
+		Keys.Add(MakeShared<FJsonValueObject>(Item));
+	}
+	return Keys;
+}
+
+/** JSON(패널 형식) → Body keys. 모르는 부위는 건너뛴다. */
+TArray<FHandKey> HandKeysFromJson(const TArray<TSharedPtr<FJsonValue>>& Items)
+{
+	TArray<FHandKey> Keys;
+	for (const TSharedPtr<FJsonValue>& Value : Items)
+	{
+		const TSharedPtr<FJsonObject> Object = Value.IsValid() ? Value->AsObject() : nullptr;
+		if (!Object.IsValid()) continue;
+		const FString BoneName = Object->GetStringField(TEXT("bone"));
+		int32 Bone = INDEX_NONE;
+		for (int32 Index = 0; Index < 5; ++Index) if (BoneName == KeyBoneNames[Index]) Bone = Index;
+		const TArray<TSharedPtr<FJsonValue>>* Offset = nullptr;
+		if (Bone == INDEX_NONE || !Object->TryGetArrayField(TEXT("offset"), Offset) || Offset->Num() < 3) continue;
+		FHandKey Key;
+		Key.Time = static_cast<float>(Object->GetNumberField(TEXT("time")));
+		Key.Bone = static_cast<EKimodoKeyBone>(Bone);
+		Key.Right = static_cast<float>((*Offset)[0]->AsNumber());
+		Key.Up = static_cast<float>((*Offset)[1]->AsNumber());
+		Key.Forward = static_cast<float>((*Offset)[2]->AsNumber());
+		Keys.Add(Key);
+	}
+	return Keys;
+}
+
+/**
+ * Body keys 타임라인: 부위별 트랙(RH/LH/RF/LF/Hip)에 키를 ◆로 보여 준다(시퀀서처럼).
+ * ◆ 클릭 = 선택(재생 위치 이동), ◆ 좌우 드래그 = 시각 변경, 트랙 더블클릭 = 그 자리에 키 추가,
+ * 빈 곳 클릭·드래그 = 재생 위치 이동, Delete = 선택한 키 삭제, K = 재생 위치에 키 추가.
+ */
+class SKimodoKeyTimeline : public SLeafWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SKimodoKeyTimeline) {}
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments&) {}
+
+	TFunction<const TArray<FHandKey>&()> GetKeys;
+	TFunction<int32()> GetSelected;
+	TFunction<float()> GetLength;
+	TFunction<float()> GetTime;
+	TFunction<void(int32)> OnSelect;
+	TFunction<void(int32, float)> OnMoveKey;
+	TFunction<void(EKimodoKeyBone, float)> OnAddKey;
+	/** K로 추가할 때(고른 키가 없으면) 쓸 부위: 키 바에서 고른 부위. */
+	TFunction<EKimodoKeyBone()> GetNewKeyBone;
+	TFunction<void(int32)> OnRemoveKey;
+	TFunction<void(float)> OnScrub;
+
+	static constexpr float LabelWidth = 34.0f;
+	static constexpr float MinRowHeight = 15.0f;
+	static constexpr int32 Rows = 5;
+
+	FVector2D ComputeDesiredSize(float) const override { return FVector2D(200.0f, Rows * MinRowHeight + 4.0f); }
+	bool SupportsKeyboardFocus() const override { return true; }
+
+	int32 OnPaint(const FPaintArgs& Args, const FGeometry& Geometry, const FSlateRect& Culling, FSlateWindowElementList& Out,
+		int32 Layer, const FWidgetStyle& Style, bool bParentEnabled) const override
+	{
+		const FSlateBrush* White = FAppStyle::GetBrush("WhiteBrush");
+		const FVector2D Size = Geometry.GetLocalSize();
+		const float Length = GetLength ? GetLength() : 0.0f;
+		const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Regular", 8);
+		const float RowHeight = RowHeightFor(Size.Y);
+		static const TCHAR* Labels[] = { TEXT("RH"), TEXT("LH"), TEXT("RF"), TEXT("LF"), TEXT("Hip") };
+		for (int32 Row = 0; Row < Rows; ++Row)
+		{
+			const float Y = 2.0f + Row * RowHeight;
+			FSlateDrawElement::MakeBox(Out, Layer, Geometry.ToPaintGeometry(FVector2f(Size.X - LabelWidth, RowHeight - 1.0f), FSlateLayoutTransform(FVector2f(LabelWidth, Y))),
+				White, ESlateDrawEffect::None, FLinearColor(1, 1, 1, Row % 2 ? 0.03f : 0.06f));
+			FSlateDrawElement::MakeText(Out, Layer + 1, Geometry.ToPaintGeometry(FVector2f(LabelWidth, RowHeight), FSlateLayoutTransform(FVector2f(2.0f, Y + 1.0f))),
+				FString(Labels[Row]), Font, ESlateDrawEffect::None, FLinearColor(0.6f, 0.6f, 0.6f));
+		}
+		if (Length <= 0.0f) return Layer + 2;
+
+		// 0.5초 눈금
+		for (float T = 0.0f; T <= Length + 1e-3f; T += 0.5f)
+		{
+			const float X = TimeToX(T, Size.X, Length);
+			TArray<FVector2f> Tick = { FVector2f(X, 0.0f), FVector2f(X, Size.Y) };
+			FSlateDrawElement::MakeLines(Out, Layer + 1, Geometry.ToPaintGeometry(), Tick, ESlateDrawEffect::None,
+				FLinearColor(1, 1, 1, FMath::IsNearlyZero(FMath::Fmod(T, 1.0f), 1e-3f) ? 0.15f : 0.06f));
+		}
+		// 키 ◆: 고른 키는 노랑·크게, 나머지는 하늘색
+		const TArray<FHandKey>& Keys = GetKeys();
+		const int32 Selected = GetSelected ? GetSelected() : INDEX_NONE;
+		for (int32 Index = 0; Index < Keys.Num(); ++Index)
+		{
+			const bool bSelected = Index == Selected;
+			const float Diamond = bSelected ? 10.0f : 8.0f;
+			const FVector2f Center(TimeToX(Keys[Index].Time, Size.X, Length), RowCenter(static_cast<int32>(Keys[Index].Bone), RowHeight));
+			FSlateDrawElement::MakeRotatedBox(Out, Layer + 2,
+				Geometry.ToPaintGeometry(FVector2f(Diamond, Diamond), FSlateLayoutTransform(Center - FVector2f(Diamond * 0.5f))),
+				White, ESlateDrawEffect::None, UE_PI / 4.0f, TOptional<FVector2f>(), FSlateDrawElement::RelativeToElement,
+				bSelected ? FLinearColor(1.0f, 0.8f, 0.1f) : FLinearColor(0.2f, 0.75f, 1.0f));
+		}
+		// 재생 위치
+		const float PlayX = TimeToX(GetTime ? GetTime() : 0.0f, Size.X, Length);
+		TArray<FVector2f> Playhead = { FVector2f(PlayX, 0.0f), FVector2f(PlayX, Size.Y) };
+		FSlateDrawElement::MakeLines(Out, Layer + 3, Geometry.ToPaintGeometry(), Playhead, ESlateDrawEffect::None, FLinearColor(1.0f, 0.3f, 0.2f), true, 1.5f);
+		return Layer + 4;
+	}
+
+	FReply OnMouseButtonDown(const FGeometry& Geometry, const FPointerEvent& Event) override
+	{
+		if (!GetLength || GetLength() <= 0.0f) return FReply::Unhandled();
+		if (Event.GetEffectingButton() == EKeys::RightMouseButton) return FReply::Handled();  // 메뉴는 버튼을 뗄 때
+		if (Event.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Unhandled();
+		const FVector2D Local = Geometry.AbsoluteToLocal(Event.GetScreenSpacePosition());
+		DraggingKey = HitKey(Local, Geometry.GetLocalSize());
+		if (DraggingKey != INDEX_NONE)
+		{
+			if (OnSelect) OnSelect(DraggingKey);
+		}
+		else if (Local.X >= LabelWidth && OnScrub)
+		{
+			bScrubbing = true;
+			OnScrub(XToTime(Local.X, Geometry.GetLocalSize().X));
+		}
+		return FReply::Handled().CaptureMouse(SharedThis(this)).SetUserFocus(SharedThis(this), EFocusCause::Mouse);
+	}
+
+	FReply OnMouseMove(const FGeometry& Geometry, const FPointerEvent& Event) override
+	{
+		if (!HasMouseCapture()) return FReply::Unhandled();
+		const FVector2D Local = Geometry.AbsoluteToLocal(Event.GetScreenSpacePosition());
+		const float Time = XToTime(Local.X, Geometry.GetLocalSize().X);
+		if (DraggingKey != INDEX_NONE && OnMoveKey) OnMoveKey(DraggingKey, Time);
+		else if (bScrubbing && OnScrub) OnScrub(Time);
+		return FReply::Handled();
+	}
+
+	FReply OnMouseButtonUp(const FGeometry& Geometry, const FPointerEvent& Event) override
+	{
+		if (Event.GetEffectingButton() == EKeys::RightMouseButton && GetLength && GetLength() > 0.0f)
+		{
+			OpenContextMenu(Geometry, Event);
+			return FReply::Handled();
+		}
+		DraggingKey = INDEX_NONE;
+		bScrubbing = false;
+		return HasMouseCapture() ? FReply::Handled().ReleaseMouseCapture() : FReply::Unhandled();
+	}
+
+	/** 우클릭 메뉴: 그 자리(시각)에 부위별 키 추가, ◆ 위면 그 키 삭제. 클릭한 트랙의 부위가 맨 위. */
+	void OpenContextMenu(const FGeometry& Geometry, const FPointerEvent& Event)
+	{
+		const FVector2D Local = Geometry.AbsoluteToLocal(Event.GetScreenSpacePosition());
+		const float Time = XToTime(FMath::Max(static_cast<float>(Local.X), LabelWidth), Geometry.GetLocalSize().X);
+		const EKimodoKeyBone RowBone = static_cast<EKimodoKeyBone>(RowAt(Local.Y, Geometry.GetLocalSize().Y));
+		const int32 Hit = HitKey(Local, Geometry.GetLocalSize());
+		static const TCHAR* Names[] = { TEXT("right hand"), TEXT("left hand"), TEXT("right foot"), TEXT("left foot"), TEXT("hips") };
+
+		FMenuBuilder Menu(true, nullptr);
+		Menu.BeginSection(NAME_None, FText::Format(NSLOCTEXT("KimodoTimeline", "AddAt", "Add key at {0}s"), FText::AsNumber(Time)));
+		TArray<EKimodoKeyBone> Order = { RowBone };
+		for (int32 Bone = 0; Bone < Rows; ++Bone) if (static_cast<EKimodoKeyBone>(Bone) != RowBone) Order.Add(static_cast<EKimodoKeyBone>(Bone));
+		for (const EKimodoKeyBone Bone : Order)
+		{
+			Menu.AddMenuEntry(FText::Format(NSLOCTEXT("KimodoTimeline", "AddPart", "Add {0} key"), FText::FromString(Names[static_cast<int32>(Bone)])),
+				FText::GetEmpty(), FSlateIcon(),
+				FUIAction(FExecuteAction::CreateLambda([this, Bone, Time] { if (OnAddKey) OnAddKey(Bone, Time); })));
+		}
+		Menu.EndSection();
+		if (Hit != INDEX_NONE)
+		{
+			Menu.AddMenuSeparator();
+			Menu.AddMenuEntry(NSLOCTEXT("KimodoTimeline", "DeleteKey", "Delete this key"), FText::GetEmpty(), FSlateIcon(),
+				FUIAction(FExecuteAction::CreateLambda([this, Hit] { if (OnRemoveKey) OnRemoveKey(Hit); })));
+		}
+		FSlateApplication::Get().PushMenu(SharedThis(this), FWidgetPath(), Menu.MakeWidget(), Event.GetScreenSpacePosition(),
+			FPopupTransitionEffect::ContextMenu);
+	}
+
+	FReply OnMouseButtonDoubleClick(const FGeometry& Geometry, const FPointerEvent& Event) override
+	{
+		const FVector2D Local = Geometry.AbsoluteToLocal(Event.GetScreenSpacePosition());
+		const int32 Row = RowAt(Local.Y, Geometry.GetLocalSize().Y);
+		if (Local.X >= LabelWidth && OnAddKey && HitKey(Local, Geometry.GetLocalSize()) == INDEX_NONE)
+		{
+			OnAddKey(static_cast<EKimodoKeyBone>(Row), XToTime(Local.X, Geometry.GetLocalSize().X));
+		}
+		return FReply::Handled();
+	}
+
+	FReply OnKeyDown(const FGeometry& Geometry, const FKeyEvent& Event) override
+	{
+		const int32 Selected = GetSelected ? GetSelected() : INDEX_NONE;
+		if ((Event.GetKey() == EKeys::Delete || Event.GetKey() == EKeys::BackSpace) && Selected != INDEX_NONE && OnRemoveKey)
+		{
+			OnRemoveKey(Selected);
+			return FReply::Handled();
+		}
+		if (Event.GetKey() == EKeys::K && OnAddKey && GetTime)
+		{
+			const TArray<FHandKey>& Keys = GetKeys();
+			OnAddKey(Keys.IsValidIndex(Selected) ? Keys[Selected].Bone : (GetNewKeyBone ? GetNewKeyBone() : EKimodoKeyBone::RightHand), GetTime());
+			return FReply::Handled();
+		}
+		return FReply::Unhandled();
+	}
+
+private:
+	float TimeToX(float Time, float Width, float Length) const
+	{
+		return LabelWidth + (Width - LabelWidth - 6.0f) * FMath::Clamp(Time / Length, 0.0f, 1.0f);
+	}
+	float XToTime(float X, float Width) const
+	{
+		const float Length = GetLength();
+		// 0.1초 단위로 맞춘다(키 시각 칸과 같은 단위).
+		const float Raw = (X - LabelWidth) / FMath::Max(Width - LabelWidth - 6.0f, 1.0f) * Length;
+		return FMath::Clamp(FMath::RoundToFloat(Raw * 10.0f) / 10.0f, 0.0f, Length);
+	}
+	/** 아래 영역을 키우면 트랙도 같이 커진다. */
+	/** 영역이 작아도 5줄이 모두 보이게 줄인다(트랙이 잘려 RH만 보이지 않도록). */
+	static float RowHeightFor(float Height) { return FMath::Max(8.0f, (Height - 4.0f) / Rows); }
+	static float RowCenter(int32 Row, float RowHeight) { return 2.0f + Row * RowHeight + RowHeight * 0.5f - 0.5f; }
+	static int32 RowAt(float Y, float Height) { return FMath::Clamp(FMath::FloorToInt((Y - 2.0f) / RowHeightFor(Height)), 0, Rows - 1); }
+	int32 HitKey(const FVector2D& Local, const FVector2D& Size) const
+	{
+		const float Length = GetLength ? GetLength() : 0.0f;
+		if (Length <= 0.0f || !GetKeys) return INDEX_NONE;
+		const TArray<FHandKey>& Keys = GetKeys();
+		int32 Best = INDEX_NONE;
+		float BestDistance = 7.0f;
+		for (int32 Index = 0; Index < Keys.Num(); ++Index)
+		{
+			const FVector2D Center(TimeToX(Keys[Index].Time, Size.X, Length), RowCenter(static_cast<int32>(Keys[Index].Bone), RowHeightFor(Size.Y)));
+			const float Distance = FVector2D::Distance(Center, Local);
+			if (Distance <= BestDistance)
+			{
+				BestDistance = Distance;
+				Best = Index;
+			}
+		}
+		return Best;
+	}
+
+	int32 DraggingKey = INDEX_NONE;
+	bool bScrubbing = false;
 };
 
 /** 패널의 테이크 목록 한 줄. Python 상태(JSON)의 takes 항목을 그대로 옮긴다. */
@@ -192,6 +465,8 @@ struct FKimodoTake
 	FString Target;
 	/** 프리뷰가 메모리에 올라와 있는지. 아니면 고를 때 원본 glTF를 다시 가져온다. */
 	bool bLoaded = false;
+	/** 이 테이크의 Body keys(편집한 키, 없으면 이 테이크를 만들 때 쓴 키). */
+	TArray<FHandKey> Keys;
 };
 
 /** 같은 경로의 에셋이 실제로 있는지. 지난번 고른 에셋이 지워졌으면 프로젝트 기본값으로 돌아간다. */
@@ -280,6 +555,7 @@ public:
 		Preview->SetFollowBone(Settings->PreviewFollowBone);
 		Status = LOCTEXT("WaitingForPython", "Waiting for Unreal Python…");
 		RegisterActiveTimer(0.5f, FWidgetActiveTimerDelegate::CreateSP(this, &SKimodoPanel::Poll));
+		BindKeyTimeline();
 		RebuildHandKeyRows();
 	}
 
@@ -321,9 +597,13 @@ private:
 
 	TSharedRef<SWidget> MakePreviewArea()
 	{
-		return SNew(SVerticalBox)
-			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8, 8, 4, 0)
+		// 위: 3D 미리보기, 아래: 재생 바·키 추가 바·키 타임라인. 경계를 끌어 아래 영역 높이를 바꾼다.
+		return SNew(SSplitter)
+			.Orientation(Orient_Vertical)
+			+ SSplitter::Slot().Value(0.72f)
 			[
+				SNew(SBox).Padding(FMargin(8, 8, 4, 0))
+				[
 				SAssignNew(Preview, SKimodoPreview)
 				// 미리보기에서 손 키 핸들을 끌면 그 키의 오프셋(cm)을 바로 바꾼다(칸은 값을 직접 읽어 따라온다).
 				.OnHandKeyDragged_Lambda([this](int32 Index, const FVector& Offset) {
@@ -332,8 +612,13 @@ private:
 					HandKeys[Index].Up = FMath::RoundToFloat(Offset.Y);
 					HandKeys[Index].Forward = FMath::RoundToFloat(Offset.Z);
 				})
+				]
 			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(8, 6, 4, 8)
+			// 재생 바 + 키 바 + 트랙 5줄이 다 보이는 높이가 최소
+			+ SSplitter::Slot().Value(0.28f).MinSize(130.0f)
+			[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().Padding(8, 6, 4, 4)
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth()
@@ -384,7 +669,93 @@ private:
 						return FReply::Handled();
 					})
 				]
+			]
+			// 키 추가 바: 부위 고르기 + Add Key(재생 위치에)
+			+ SVerticalBox::Slot().AutoHeight().Padding(8, 0, 4, 4)
+			[
+				SNew(SHorizontalBox)
+				.Visibility_Lambda([this] { return Preview.IsValid() && Preview->GetLength() > 0.0f && bCanRevise ? EVisibility::Visible : EVisibility::Collapsed; })
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("KeysLabel", "Body keys")).ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 6, 0)
+				[
+					SNew(SSegmentedControl<EKimodoKeyBone>)
+					.ToolTipText(LOCTEXT("NewKeyPartTip", "Part for Add Key"))
+					.Value_Lambda([this] { return NewKeyBone; })
+					.OnValueChanged_Lambda([this](EKimodoKeyBone Bone) { NewKeyBone = Bone; })
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::RightHand).Text(LOCTEXT("NewRH", "RH"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::LeftHand).Text(LOCTEXT("NewLH", "LH"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::RightFoot).Text(LOCTEXT("NewRF", "RF"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::LeftFoot).Text(LOCTEXT("NewLF", "LF"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::Hips).Text(LOCTEXT("NewHip", "Hip"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("AddKeyButton", "+ Add Key"))
+					.ToolTipText(LOCTEXT("AddKeyButtonTip", "Add a key for the chosen part at the playhead (K). Right-click the timeline for more."))
+					.OnClicked_Lambda([this] {
+						if (KeyTimeline.IsValid() && KeyTimeline->OnAddKey) KeyTimeline->OnAddKey(NewKeyBone, FMath::RoundToFloat(Preview->GetTime() * 10.0f) / 10.0f);
+						return FReply::Handled();
+					})
+				]
+			]
+			// Body keys 타임라인(Body keys를 쓸 수 있을 때만). 아래 영역을 키우면 트랙도 커진다.
+			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8, 0, 4, 8)
+			[
+				SNew(SBox)
+				.Visibility_Lambda([this] { return Preview.IsValid() && Preview->GetLength() > 0.0f && bCanRevise ? EVisibility::Visible : EVisibility::Collapsed; })
+				.ToolTipText(LOCTEXT("TimelineTip", "Body keys: click a diamond to select it, drag it to change its time, double-click a track to add a key.\n"
+					"Right-click for the add/delete menu. Click an empty spot to move the playhead. Delete removes the selected key, K adds one at the playhead."))
+				[
+					SAssignNew(KeyTimeline, SKimodoKeyTimeline)
+				]
+			]
 			];
+	}
+
+	/** 타임라인이 패널의 키 목록을 읽고 고치도록 연결한다. */
+	void BindKeyTimeline()
+	{
+		if (!KeyTimeline.IsValid()) return;
+		KeyTimeline->GetKeys = [this]() -> const TArray<FHandKey>& { return HandKeys; };
+		KeyTimeline->GetSelected = [this] { return SelectedHandKey; };
+		KeyTimeline->GetLength = [this] { return Preview.IsValid() ? Preview->GetLength() : 0.0f; };
+		KeyTimeline->GetTime = [this] { return Preview.IsValid() ? Preview->GetTime() : 0.0f; };
+		KeyTimeline->OnSelect = [this](int32 Index) { SelectHandKey(Index); RebuildHandKeyRows(); };
+		KeyTimeline->OnMoveKey = [this](int32 Index, float Time) {
+			if (!HandKeys.IsValidIndex(Index)) return;
+			// 같은 부위의 다른 키와 같은 시각으로는 옮기지 않는다(◆가 겹치고 Kimodo도 하나만 쓴다).
+			if (FindHandKey(HandKeys[Index].Bone, Time, Index) != INDEX_NONE) return;
+			HandKeys[Index].Time = Time;
+			if (Preview.IsValid()) Preview->Scrub(Time);
+			SyncHandKeysToPreview();
+		};
+		KeyTimeline->OnAddKey = [this](EKimodoKeyBone Bone, float Time) {
+			// 그 부위·시각에 이미 키가 있으면 새로 겹쳐 만들지 않고 그 키를 고른다.
+			const int32 Existing = FindHandKey(Bone, Time);
+			if (Existing != INDEX_NONE)
+			{
+				SelectHandKey(Existing);
+				RebuildHandKeyRows();
+				return;
+			}
+			HandKeys.Add({ Time, Bone, 0.0f, 0.0f, 0.0f });
+			SelectedHandKey = HandKeys.Num() - 1;
+			NewKeyBone = Bone;
+			if (Preview.IsValid()) Preview->Scrub(Time);
+			RebuildHandKeyRows();
+		};
+		KeyTimeline->GetNewKeyBone = [this] { return NewKeyBone; };
+		KeyTimeline->OnRemoveKey = [this](int32 Index) {
+			if (!HandKeys.IsValidIndex(Index)) return;
+			HandKeys.RemoveAt(Index);
+			SelectedHandKey = INDEX_NONE;
+			RebuildHandKeyRows();
+		};
+		KeyTimeline->OnScrub = [this](float Time) { if (Preview.IsValid()) Preview->Scrub(Time); };
 	}
 
 	/** 이 컴퓨터에 Kimodo가 없으면 설치 안내와 버튼을 보여 준다. */
@@ -781,7 +1152,7 @@ private:
 					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 					.Text(LOCTEXT("HandKeysHelp", "Move a hand, foot or the hips at given times, relative to the selected take's pose (cm: right / up / forward from the character). "
 						"Kimodo can pin only these five parts; moving the hips moves the whole body (e.g. lower it to crouch). "
-						"Select a key (radio button) and drag its yellow handle in the preview; turn the camera to move it forward or back. "
+						"Pick a key on the timeline under the preview (diamonds); in the preview, drag an arrow (red right, green up, blue forward) or the center to move it. "
 						"Generate with keys keeps the take's prompt, seed, length and steps and adds a new take. Fewer than 20 keys per hand work best."))
 				]
 				+ SVerticalBox::Slot().AutoHeight()
@@ -795,11 +1166,13 @@ private:
 					[
 						SNew(SButton)
 						.Text(LOCTEXT("AddHandKey", "+ Key at playhead"))
-						.ToolTipText(LOCTEXT("AddHandKeyTip", "Add a key at the preview's current time (pause the preview where you want it). Pick the part (RH, LH, RF, LF, Hip) on its row."))
+						.ToolTipText(LOCTEXT("AddHandKeyTip", "Add a key at the preview's current time (pause the preview where you want it), for the part chosen under the preview (RH, LH, RF, LF, Hip)."))
 						.OnClicked_Lambda([this] {
-							HandKeys.Add({ FMath::RoundToFloat(Preview->GetTime() * 10.0f) / 10.0f, EKimodoKeyBone::RightHand, 0.0f, 0.0f, 0.0f });
-							SelectedHandKey = HandKeys.Num() - 1;  // 바로 미리보기에서 끌 수 있게 새 키를 고른다
-							RebuildHandKeyRows();
+							// 프리뷰 아래 키 바에서 고른 부위로 추가한다(타임라인 추가와 같은 경로).
+							if (KeyTimeline.IsValid() && KeyTimeline->OnAddKey)
+							{
+								KeyTimeline->OnAddKey(NewKeyBone, FMath::RoundToFloat(Preview->GetTime() * 10.0f) / 10.0f);
+							}
 							return FReply::Handled();
 						})
 					]
@@ -873,8 +1246,22 @@ private:
 	void SelectHandKey(int32 Index)
 	{
 		SelectedHandKey = HandKeys.IsValidIndex(Index) ? Index : INDEX_NONE;
-		if (HandKeys.IsValidIndex(SelectedHandKey) && Preview.IsValid()) Preview->Scrub(HandKeys[SelectedHandKey].Time);
+		if (HandKeys.IsValidIndex(SelectedHandKey))
+		{
+			NewKeyBone = HandKeys[SelectedHandKey].Bone;  // Add Key가 고른 키의 부위를 따른다
+			if (Preview.IsValid()) Preview->Scrub(HandKeys[SelectedHandKey].Time);
+		}
 		SyncHandKeysToPreview();
+	}
+
+	/** 같은 부위에서 Time(0.05초 이내)에 있는 키. Ignore 번 키는 건너뛴다. 없으면 INDEX_NONE. */
+	int32 FindHandKey(EKimodoKeyBone Bone, float Time, int32 Ignore = INDEX_NONE) const
+	{
+		for (int32 Index = 0; Index < HandKeys.Num(); ++Index)
+		{
+			if (Index != Ignore && HandKeys[Index].Bone == Bone && FMath::Abs(HandKeys[Index].Time - Time) < 0.05f) return Index;
+		}
+		return INDEX_NONE;
 	}
 
 	/** 손 키프레임 한 줄씩 다시 그린다(추가·삭제·프리셋 때). 값은 칸에서 바로 HandKeys에 반영한다. */
@@ -888,7 +1275,8 @@ private:
 		{
 			HandKeyRows->AddSlot().AutoHeight()
 			[
-				SNew(STextBlock).Text(LOCTEXT("NoHandKeys", "No keys yet.")).ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				SNew(STextBlock).Text(LOCTEXT("NoHandKeys", "No keys yet. Double-click a track on the timeline under the preview, or use the buttons below."))
+				.AutoWrapText(true).ColorAndOpacity(FSlateColor::UseSubduedForeground())
 			];
 			return;
 		}
@@ -909,10 +1297,24 @@ private:
 				})
 			];
 		};
-		for (int32 Index = 0; Index < HandKeys.Num(); ++Index)
+		// 모든 키를 부위·시각 순으로 한 줄씩. 고른 키(타임라인의 노란 ◆)는 줄 배경을 밝힌다.
+		TArray<int32> Order;
+		for (int32 Index = 0; Index < HandKeys.Num(); ++Index) Order.Add(Index);
+		Order.StableSort([this](int32 A, int32 B) {
+			if (HandKeys[A].Bone != HandKeys[B].Bone) return HandKeys[A].Bone < HandKeys[B].Bone;
+			return HandKeys[A].Time < HandKeys[B].Time;
+		});
+		for (const int32 Index : Order)
 		{
-			HandKeyRows->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+			HandKeyRows->AddSlot().AutoHeight().Padding(0, 0, 0, 2)
 			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor_Lambda([this, Index] {
+					return SelectedHandKey == Index ? FLinearColor(1.0f, 0.8f, 0.1f, 0.12f) : FLinearColor::Transparent;
+				})
+				.Padding(FMargin(2, 1))
+				[
 				SNew(SHorizontalBox)
 				// 선택(●): 미리보기를 이 키의 시각으로 옮기고, 노란 핸들을 끌어 손 위치를 정한다.
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
@@ -937,9 +1339,9 @@ private:
 					SNew(SSegmentedControl<EKimodoKeyBone>)
 					.Value_Lambda([this, Index] { return HandKeys.IsValidIndex(Index) ? HandKeys[Index].Bone : EKimodoKeyBone::RightHand; })
 					.OnValueChanged_Lambda([this, Index](EKimodoKeyBone Bone) {
-						if (!HandKeys.IsValidIndex(Index)) return;
+						if (!HandKeys.IsValidIndex(Index) || FindHandKey(Bone, HandKeys[Index].Time, Index) != INDEX_NONE) return;
 						HandKeys[Index].Bone = Bone;
-						SyncHandKeysToPreview();
+						RebuildHandKeyRows();  // 부위·시각 순서가 바뀐다
 					})
 					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::RightHand).Text(LOCTEXT("PartRightHand", "RH")).ToolTip(LOCTEXT("PartRightHandTip", "Right hand"))
 					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::LeftHand).Text(LOCTEXT("PartLeftHand", "LH")).ToolTip(LOCTEXT("PartLeftHandTip", "Left hand"))
@@ -974,6 +1376,7 @@ private:
 					[
 						SNew(SImage).Image(FAppStyle::GetBrush("Icons.X")).ColorAndOpacity(FSlateColor::UseSubduedForeground())
 					]
+				]
 				]
 			];
 		}
@@ -1422,21 +1825,16 @@ private:
 		Payload->SetNumberField(TEXT("count"), GetBatchCount());
 		Payload->SetNumberField(TEXT("steps"), GetDiffusionSteps());
 		// 손 키프레임(cm). Python(parse_hand_keys)이 m로 바꾸고 검사한다.
-		TArray<TSharedPtr<FJsonValue>> Keys;
-		for (const FHandKey& Key : HandKeys)
+		Payload->SetArrayField(TEXT("hand_keys"), HandKeysToJson(HandKeys));
+		// 편집 중인 키가 바뀌었으면 그 테이크에 남기도록 같이 보낸다(테이크마다 키를 따로 기억).
+		if (!KeysTakeId.IsEmpty() && HandKeys != SentHandKeys)
 		{
-			TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
-			Item->SetNumberField(TEXT("time"), Key.Time);
-			static const TCHAR* BoneNames[] = { TEXT("right_hand"), TEXT("left_hand"), TEXT("right_foot"), TEXT("left_foot"), TEXT("hips") };
-			Item->SetStringField(TEXT("bone"), BoneNames[FMath::Clamp(static_cast<int32>(Key.Bone), 0, 4)]);
-			TArray<TSharedPtr<FJsonValue>> Offset;
-			Offset.Add(MakeShared<FJsonValueNumber>(Key.Right));
-			Offset.Add(MakeShared<FJsonValueNumber>(Key.Up));
-			Offset.Add(MakeShared<FJsonValueNumber>(Key.Forward));
-			Item->SetArrayField(TEXT("offset"), Offset);
-			Keys.Add(MakeShared<FJsonValueObject>(Item));
+			const TSharedRef<FJsonObject> TakeKeys = MakeShared<FJsonObject>();
+			TakeKeys->SetStringField(TEXT("id"), KeysTakeId);
+			TakeKeys->SetArrayField(TEXT("keys"), HandKeysToJson(HandKeys));
+			Payload->SetObjectField(TEXT("take_keys"), TakeKeys);
+			SentHandKeys = HandKeys;
 		}
-		Payload->SetArrayField(TEXT("hand_keys"), Keys);
 		Payload->SetStringField(TEXT("python"), ResolveLocalPath(TEXT("KIMODO_PYTHON"), TEXT("ECLIPSE_KIMODO_PYTHON"), UserSettings->PythonExecutable.FilePath, GetManagedPython()));
 		Payload->SetStringField(TEXT("model_cache"), ResolveLocalPath(TEXT("KIMODO_MODEL_CACHE"), TEXT("ECLIPSE_KIMODO_MODEL_CACHE"), UserSettings->ModelCacheDirectory.Path, GetManagedInstallRoot() / TEXT("model-cache")));
 		Payload->SetStringField(TEXT("bootstrap_python"), GetBootstrapPython());
@@ -1662,6 +2060,8 @@ private:
 				Take->Saved = Object->GetStringField(TEXT("saved"));
 				Take->Target = Object->GetStringField(TEXT("target"));
 				Take->bLoaded = Object->GetBoolField(TEXT("loaded"));
+				const TArray<TSharedPtr<FJsonValue>>* KeyItems = nullptr;
+				if (Object->TryGetArrayField(TEXT("keys"), KeyItems)) Take->Keys = HandKeysFromJson(*KeyItems);
 				Signature += FString::Printf(TEXT("%s:%d:%d:%s;"), *Take->Id, Take->bStarred ? 1 : 0, Take->bLoaded ? 1 : 0, *Take->Saved);
 				NewTakes.Add(Take);
 			}
@@ -1673,7 +2073,26 @@ private:
 			Takes = MoveTemp(NewTakes);
 			if (TakesView.IsValid()) TakesView->RequestListRefresh();
 		}
+		else
+		{
+			// 목록은 그대로여도 키는 최신으로(다음 테이크 전환 때 쓴다).
+			for (int32 Index = 0; Index < Takes.Num() && Index < NewTakes.Num(); ++Index) Takes[Index]->Keys = MoveTemp(NewTakes[Index]->Keys);
+		}
 		SyncTakeSelection();
+
+		// 다른 테이크로 바뀌면 그 테이크의 Body keys를 불러온다. 이전 테이크의 키는 이번 요청에 실려 이미 저장됐다.
+		if (SelectedTakeId != KeysTakeId)
+		{
+			const TSharedPtr<FKimodoTake> Take = GetSelectedTake();
+			KeysTakeId = Take.IsValid() ? SelectedTakeId : FString();
+			if (Take.IsValid() || !HandKeys.IsEmpty())
+			{
+				HandKeys = Take.IsValid() ? Take->Keys : TArray<FHandKey>();
+				SentHandKeys = HandKeys;
+				SelectedHandKey = INDEX_NONE;
+				RebuildHandKeyRows();
+			}
+		}
 	}
 
 	/** Python이 알려 준 선택 테이크(없으면 null). Revise 버튼·안내문이 기준 테이크를 보여 줄 때 쓴다. */
@@ -1750,9 +2169,15 @@ private:
 	TSharedPtr<SEditableTextBox> Revision;
 	/** 손 키프레임 목록과 그 줄들을 담는 상자(Hand keys). */
 	TArray<FHandKey> HandKeys;
+	/** HandKeys가 어느 테이크의 키인지, 그 테이크에 마지막으로 보낸 키. 테이크를 바꾸면 그 테이크의 키를 불러온다. */
+	FString KeysTakeId;
+	mutable TArray<FHandKey> SentHandKeys;
 	TSharedPtr<SVerticalBox> HandKeyRows;
 	/** 미리보기에서 드래그할 수 있는 키(●). INDEX_NONE이면 선택 없음. */
 	int32 SelectedHandKey = INDEX_NONE;
+	TSharedPtr<SKimodoKeyTimeline> KeyTimeline;
+	/** + Add Key로 추가할 부위 */
+	EKimodoKeyBone NewKeyBone = EKimodoKeyBone::RightHand;
 	TSharedPtr<SEditableTextBox> AssetName;
 	TSharedPtr<SEditableTextBox> SaveFolder;
 	TSharedPtr<SComboButton> FolderPicker;
@@ -1800,12 +2225,14 @@ public:
 			.SetMenuType(ETabSpawnerMenuType::Hidden);
 		UToolMenus::RegisterStartupCallback(
 			FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FKimodoAnimationModule::RegisterMenus));
+		RegisterKimodoKeyEdMode();
 	}
 
 	void ShutdownModule() override
 	{
 		UToolMenus::UnRegisterStartupCallback(this);
 		UToolMenus::UnregisterOwner(this);
+		UnregisterKimodoKeyEdMode();
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(KimodoTabName);
 		// 에디터 종료 중에는 해제하지 않는다. 이때는 Content Browser 데이터 서브시스템이 먼저 정리되어
 		// 마운트 해제 알림(OnContentPathDismounted)을 받은 쪽이 null을 참조해 크래시한다. 프로세스가 끝나므로 해제할 필요도 없다.

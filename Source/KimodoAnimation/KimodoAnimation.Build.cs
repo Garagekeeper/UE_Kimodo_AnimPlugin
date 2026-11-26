@@ -21,6 +21,7 @@ public class KimodoAnimation : ModuleRules
 			{
 				"Projects",
 				"UnrealEd",
+				"EditorFramework",
 				"Slate",
 				"SlateCore",
 				"ToolMenus",

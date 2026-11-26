@@ -24,6 +24,13 @@ struct FKimodoHandTarget
 	FVector Offset = FVector::ZeroVector;
 };
 
+/**
+ * 미리보기의 엔진 이동 기즈모를 켜는 에디터 모드. 엔진 기즈모는 활성 모드가 "위젯을 그린다"고 할 때만 그려지고
+ * 클릭되므로, 모듈 시작 때 등록하고 미리보기 뷰포트에서만 켠다.
+ */
+void RegisterKimodoKeyEdMode();
+void UnregisterKimodoKeyEdMode();
+
 /** 손 키 핸들을 드래그해 오프셋이 바뀌었을 때(키 번호, 새 오프셋 cm). */
 DECLARE_DELEGATE_TwoParams(FOnKimodoHandKeyDragged, int32, const FVector&);
 
@@ -41,7 +48,7 @@ public:
 	/** 재생 중 카메라 추적. 기본은 꺼져 있어 카메라가 사용자가 둔 자리에 머문다. */
 	void SetFollowEnabled(bool bEnabled);
 	bool IsFollowEnabled() const { return bFollow; }
-	/** 좌클릭 드래그 중에는 추적이 카메라 중심을 덮어쓰지 않도록 한다. */
+	/** 카메라 드래그 중에는 추적이 카메라 중심을 덮어쓰지 않도록 한다. */
 	void SetOrbiting(bool bInOrbiting) { bOrbiting = bInOrbiting; }
 	void Scrub(float Seconds);
 	void TogglePlay();
@@ -55,12 +62,11 @@ public:
 
 	/** 손 키 목록과 선택한 키(-1이면 없음). 각 키의 목표 위치에 표시를 그리고, 선택한 키는 드래그할 수 있다. */
 	void SetHandKeys(const TArray<FKimodoHandTarget>& InKeys, int32 InSelected);
-	/** 좌클릭이 선택한 키 핸들 근처면 드래그를 시작한다(위젯 로컬 좌표). */
-	bool TryBeginKeyDrag(const FVector2D& LocalPosition, const FVector2D& LocalSize);
-	/** 마우스 이동량만큼 선택한 키를 카메라와 마주 보는 평면에서 옮긴다. */
-	void DragKey(const FVector2D& LocalDelta, const FVector2D& LocalSize);
-	void EndKeyDrag() { bDraggingKey = false; }
-	bool IsDraggingKey() const { return bDraggingKey; }
+	/** 엔진 이동 기즈모용: 고른 키의 목표 위치와 캐릭터 축(X 앞, Y 오른쪽, Z 위). 고른 키가 없으면 false. */
+	bool GetKeyGizmo(FVector& OutLocation, FMatrix& OutAxes) const;
+	/** 기즈모 드래그(월드 이동량)만큼 고른 키를 옮기고 패널에 알린다. */
+	void MoveSelectedKey(const FVector& WorldDelta);
+	void SetDraggingKey(bool bDragging);
 
 protected:
 	TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override;
@@ -81,7 +87,6 @@ private:
 	void RefreshKeyMarkers();
 	void DrawKeyMarkers();
 	FVector KeyTarget(int32 Index) const;
-	FVector2D ProjectToLocal(const FVector& World, const FVector2D& LocalSize, bool& bInFront) const;
 
 	struct FKeyBasis
 	{

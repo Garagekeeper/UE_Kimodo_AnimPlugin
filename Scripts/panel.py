@@ -526,6 +526,37 @@ def parse_hand_keys(value):
     return keys
 
 
+def clean_panel_keys(value):
+    """패널 형식 Body keys({"time": 초, "bone": 이름, "offset": [오른쪽, 위, 앞] cm})에서 읽을 수 있는 것만 남긴다."""
+    keys = []
+    for item in value or []:
+        try:
+            time_s = float(item.get("time", 0))
+            offset = [float(v) for v in (item.get("offset") or [0, 0, 0])][:3]
+            bone = key_bone(item)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not math.isfinite(time_s) or time_s < 0 or len(offset) != 3 or not all(map(math.isfinite, offset)):
+            continue
+        keys.append({"time": round(time_s, 3), "bone": bone, "offset": [round(v, 2) for v in offset]})
+    return keys
+
+
+def panel_keys(take):
+    """테이크에 보여 줄 Body keys(cm). 편집한 키가 있으면 그것, 없으면 이 테이크를 만들 때 쓴 키(m → cm)."""
+    if take.get("edit_keys") is not None:
+        return take["edit_keys"]
+    keys = []
+    # 예전 테이크는 "bone" 대신 "hand"(right/left)로 남아 있다. 읽을 수 없는 항목은 건너뛴다.
+    for k in take.get("hand_keys") or []:
+        try:
+            keys.append({"time": float(k["time"]), "bone": key_bone(k),
+                         "offset": [round(float(v) * 100.0, 2) for v in k["offset"]][:3]})
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return keys
+
+
 def take_summary(take):
     return f"Take #{take['number']} · {take['duration']:.2f}s · seed {take['seed']}{steps_label(take)}"
 
@@ -606,6 +637,8 @@ class Panel:
             "steps": None,
             # 요청한 길이(초)와 이 테이크를 만들 때 쓴 손 키프레임(재현·기준 테이크용)
             "seconds": None, "hand_keys": [],
+            # 패널에서 이 테이크를 기준으로 편집 중인 Body keys(cm, 패널 형식). None이면 hand_keys를 보여 준다.
+            "edit_keys": None,
         }
         take.update(info)
         return take
@@ -734,6 +767,12 @@ class Panel:
         self.unload_extra()
         self.message = take_summary(take)
 
+    def set_take_keys(self, take_id, keys):
+        """패널이 이 테이크에서 편집한 Body keys(cm)를 테이크에 남긴다. 세션 파일에도 저장된다."""
+        take = self.find_take(take_id)
+        if take is not None:
+            take["edit_keys"] = clean_panel_keys(keys)
+
     def toggle_star(self, take_id):
         take = self.find_take(take_id)
         if take is not None:
@@ -753,6 +792,7 @@ class Panel:
             "duration": take["duration"], "starred": take["starred"], "saved": take["saved"],
             "target": take["target"], "source": take.get("source"), "cached": take.get("cached", ""),
             "steps": take.get("steps"), "seconds": take.get("seconds"), "hand_keys": take.get("hand_keys") or [],
+            "edit_keys": take.get("edit_keys"),
         }
 
     def persist_session(self):
@@ -880,7 +920,7 @@ class Panel:
                 seed=entry.get("seed"), duration=entry.get("duration") or 0.0, starred=bool(entry.get("starred")),
                 saved=entry.get("saved", ""), target=entry.get("target", ""), source=entry.get("source"),
                 cached=entry.get("cached", ""), steps=entry.get("steps"), seconds=entry.get("seconds"),
-                hand_keys=entry.get("hand_keys") or []))
+                hand_keys=entry.get("hand_keys") or [], edit_keys=entry.get("edit_keys")))
         # 이전 세션 테이크를 앞(오래된 쪽)에 두고, 그사이 새로 만든 테이크를 뒤에 둔다.
         current = self.takes
         # 이전 버전에서 복원 전에 만든 테이크는 번호가 겹칠 수 있다(저장된 목록에 이미 겹쳐 있을 수도 있음).
@@ -1403,6 +1443,10 @@ def dispatch(encoded_payload):
     try:
         panel.delete_stale_previews()
         panel.stop_idle_worker()
+        # 패널이 편집 중인 Body keys가 바뀌었으면 어떤 요청에든 실려 온다. 요청(테이크 전환 등)보다 먼저 남긴다.
+        take_keys = payload.get("take_keys")
+        if isinstance(take_keys, dict):
+            panel.set_take_keys(take_keys.get("id"), take_keys.get("keys"))
         if action in ("generate", "revise"):
             panel.start(value, payload.get("duration", ""), action == "revise", payload)
         elif action == "poll":
@@ -1474,6 +1518,7 @@ def dispatch(encoded_payload):
             "id": t["id"], "number": t["number"], "prompt": clean_text(t["prompt"] or t["english"]),
             "seed": "" if t["seed"] is None else str(t["seed"]), "duration": round(t["duration"], 2),
             "starred": t["starred"], "saved": t["saved"], "target": t["target"], "loaded": t["clip"] is not None,
+            "keys": panel_keys(t),
         } for t in reversed(panel.takes)],  # 최신 테이크가 위로
     }
     # Base64(UTF-8)로 감싸 EvaluateStatement의 repr 결과에서도 한글이 그대로 전달되게 한다.
