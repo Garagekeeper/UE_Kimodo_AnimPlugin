@@ -18,7 +18,7 @@ def body(t):
     keyed = s["takes"][0]
     t.check("keyed take added", len(s["takes"]) == 2 and keyed["number"] == 2, [x["number"] for x in s["takes"]])
     t.check("keyed keeps seed", keyed["seed"] == "4", keyed["seed"])
-    t.check("keyed label", "5 hand keys" in keyed["prompt"], keyed["prompt"])
+    t.check("keyed label", "5 keys" in keyed["prompt"], keyed["prompt"])
     t.check("keyed ready", s["message"].startswith("Preview ready") and events == ["ready"], (s["message"], events))
     take = t.panel.find_take(keyed["id"])
     t.check("keys stored on the take", len(take["hand_keys"]) == 5 and take["seconds"] == 4.0, take["hand_keys"])

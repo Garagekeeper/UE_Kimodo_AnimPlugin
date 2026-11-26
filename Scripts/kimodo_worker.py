@@ -42,47 +42,78 @@ def write_done(path, result):
     os.replace(temp, path)
 
 
-def hand_constraints(model, device, spec, total_frames):
-    """손 키프레임 → Kimodo 손 제약(left-hand / right-hand).
+KEY_BONES = ("right_hand", "left_hand", "right_foot", "left_foot", "hips")
 
-    spec: {"base": <기준 테이크의 Kimodo 결과 .npz>, "keys": [{"time": 초, "hand": "right"|"left",
+
+def key_bone(key):
+    """키의 부위. 1.2 이전 요청의 "hand": "right"|"left"도 받는다."""
+    bone = key.get("bone") or {"left": "left_hand"}.get(key.get("hand"), "right_hand")
+    return bone if bone in KEY_BONES else "right_hand"
+
+
+def hand_constraints(model, device, spec, total_frames):
+    """Body keys(손·발·골반 키프레임) → Kimodo end-effector 제약.
+
+    spec: {"base": <기준 테이크의 Kimodo 결과 .npz>, "keys": [{"time": 초, "bone": KEY_BONES 중 하나,
            "offset": [오른쪽, 위, 앞] (m, 캐릭터 기준)}]}
-    기준 테이크의 그 프레임 전신 자세에서 손만 offset만큼 옮긴 위치·회전을 제약으로 건다.
+    기준 테이크의 그 프레임 전신 자세에서 그 부위만 offset만큼 옮긴 위치·회전을 제약으로 건다(Kimodo가 위치를 받는
+    부위는 양손·양발·골반뿐이다). 골반 키는 루트 수평 위치·높이도 같이 옮겨 몸 전체가 따라오게 한다.
     Kimodo는 프롬프트별로 제약을 잘라(crop_move) 인덱스 텐서를 CPU에 새로 만들고, 조건 생성은 인덱스만 모델 장치로
     옮기므로 인덱스는 CPU, 값 텐서는 모델 장치에 둔다(kimodo CLI의 제약 파일 경로와 같은 배치)."""
     if not spec or not spec.get("keys"):
         return []
     import numpy as np
-    from kimodo.constraints import (LeftHandConstraintSet, RightHandConstraintSet,
+    from kimodo.constraints import (EndEffectorConstraintSet, LeftFootConstraintSet, LeftHandConstraintSet,
+                                    RightFootConstraintSet, RightHandConstraintSet,
                                     _convert_constraint_local_rots_to_skeleton)
     from kimodo.skeleton import SOMASkeleton30
 
+    classes = {
+        "right_hand": RightHandConstraintSet, "left_hand": LeftHandConstraintSet,
+        "right_foot": RightFootConstraintSet, "left_foot": LeftFootConstraintSet,
+        "hips": lambda *args, **kwargs: EndEffectorConstraintSet(*args, joint_names=["Hips"], **kwargs),
+    }
     base = np.load(spec["base"])
     skeleton = SOMASkeleton30()
+
+    def frame_of(key):
+        return min(total_frames - 1, max(0, round(float(key["time"]) * model.fps)))
+
+    def world_delta(offset, heading_row):
+        right, up, forward = (float(v) for v in offset)
+        cos, sin = float(heading_row[0]), float(heading_row[1])  # 정면 +z를 이만큼 돌린 방향
+        return np.array([-cos * right + sin * forward, up, sin * right + cos * forward])
+
+    # 골반 키가 있는 프레임은 모든 제약의 루트(수평 위치·높이)를 같이 옮겨 서로 어긋나지 않게 한다.
+    hips_delta = {frame_of(k): world_delta(k.get("offset", [0, 0, 0]), base["global_root_heading"][frame_of(k)])
+                  for k in spec["keys"] if key_bone(k) == "hips"}
+
     constraints = []
-    for hand, cls in (("right", RightHandConstraintSet), ("left", LeftHandConstraintSet)):
-        keys = sorted((k for k in spec["keys"] if k.get("hand", "right") == hand), key=lambda k: float(k["time"]))
-        frames = sorted({min(total_frames - 1, max(0, round(float(k["time"]) * model.fps))) for k in keys})
+    for bone in KEY_BONES:
+        keys = [k for k in spec["keys"] if key_bone(k) == bone]
+        offsets = {frame_of(k): k.get("offset", [0, 0, 0]) for k in sorted(keys, key=lambda k: float(k["time"]))}
+        frames = sorted(offsets)
         if not frames:
             continue
-        index = torch.tensor(frames)
         local = _convert_constraint_local_rots_to_skeleton(torch.from_numpy(base["local_rot_mats"][frames]), skeleton)
         rots, positions, _ = skeleton.fk(local, torch.from_numpy(base["root_positions"][frames]))
-        constraint = cls(skeleton, frame_indices=index, global_joints_positions=positions, global_joints_rots=rots,
-                         smooth_root_2d=torch.from_numpy(base["smooth_root_pos"][frames][:, [0, 2]]))
-        heading = base["global_root_heading"][frames]  # (cos, sin) — 정면 +z를 이만큼 돌린 방향
-        offsets = {min(total_frames - 1, max(0, round(float(k["time"]) * model.fps))): k.get("offset", [0, 0, 0])
-                   for k in keys}
+        smooth = torch.from_numpy(base["smooth_root_pos"][frames][:, [0, 2]].copy())
+        constraint = classes[bone](skeleton, frame_indices=torch.tensor(frames), global_joints_positions=positions,
+                                   global_joints_rots=rots, smooth_root_2d=smooth)
+        heading = base["global_root_heading"][frames]
+        root_y = constraint.global_joints_positions[:, skeleton.root_idx, 1].clone()
         for row, frame in enumerate(frames):
-            right, up, forward = (float(v) for v in offsets[frame])
-            cos, sin = float(heading[row, 0]), float(heading[row, 1])
-            delta = torch.tensor([-cos * right + sin * forward, up, sin * right + cos * forward], dtype=positions.dtype)
+            delta = torch.tensor(world_delta(offsets[frame], heading[row]), dtype=positions.dtype)
             constraint.global_joints_positions[row, constraint.pos_indices] += delta
-        constraint.root_y_pos = constraint.global_joints_positions[:, skeleton.root_idx, 1]
+            if frame in hips_delta:
+                shift = hips_delta[frame]
+                constraint.smooth_root_2d[row] += torch.tensor([shift[0], shift[2]], dtype=positions.dtype)
+                root_y[row] += float(shift[1])
+        constraint.root_y_pos = root_y
         for name in ("global_joints_positions", "global_joints_rots", "smooth_root_2d", "root_y_pos", "global_root_heading"):
             setattr(constraint, name, getattr(constraint, name).to(device))
         constraints.append(constraint)
-        print(f"Hand keys ({hand}): frames {frames}")
+        print(f"Body keys ({bone}): frames {frames}")
     return constraints
 
 

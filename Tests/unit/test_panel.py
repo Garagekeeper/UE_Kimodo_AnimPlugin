@@ -266,9 +266,23 @@ class ResidentWorker(unittest.TestCase):
         self.assertEqual((started["config"]["seed"], started["config"]["count"], started["config"]["steps"]), ("4", 1, 20))
         self.assertEqual(started["hand_keys"]["base"], str(job / "SOMA.npz"))
         self.assertEqual(started["hand_keys"]["keys"], [
-            {"time": 1.5, "hand": "left", "offset": [-0.3, 0.0, 0.1]},
-            {"time": 0.9, "hand": "right", "offset": [0.3, 0.05, 0.0]}])
-        self.assertIn("2 hand keys", started["label"])
+            {"time": 0.9, "bone": "right_hand", "offset": [0.3, 0.05, 0.0]},
+            {"time": 1.5, "bone": "left_hand", "offset": [-0.3, 0.0, 0.1]}])
+        self.assertIn("2 keys", started["label"])
+
+    def test_body_key_parts(self):
+        keys = panel.parse_hand_keys([
+            {"time": 1, "bone": "hips", "offset": [0, -20, 0]},
+            {"time": 1, "bone": "Left-Foot", "offset": [10, 0, 0]},
+            {"time": 2, "bone": "RF", "offset": [0, 0, 5]},
+            {"time": 3, "hand": "left", "offset": [0, 0, 0]},
+            {"time": 4, "offset": [0, 0, 0]},
+        ])
+        self.assertEqual([(k["bone"], k["time"]) for k in keys],
+                         [("right_hand", 4.0), ("left_hand", 3.0), ("right_foot", 2.0), ("left_foot", 1.0), ("hips", 1.0)])
+        self.assertEqual(keys[-1]["offset"], [0.0, -0.2, 0.0])
+        with self.assertRaisesRegex(ValueError, "Unknown key part"):
+            panel.parse_hand_keys([{"time": 1, "bone": "head", "offset": [0, 0, 0]}])
 
     def test_keyed_errors(self):
         p, take, job, _ = self.keyed_panel()

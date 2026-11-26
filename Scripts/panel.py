@@ -487,11 +487,28 @@ def steps_label(take):
 
 
 MAX_HAND_KEYS = 19  # Kimodo 권장: 제약 종류별 키프레임 20개 미만
+# Body keys로 위치를 정할 수 있는 부위(Kimodo end-effector가 받는 것: 양손·양발·골반)
+KEY_BONES = ("right_hand", "left_hand", "right_foot", "left_foot", "hips")
+BONE_ALIASES = {
+    "right": "right_hand", "r": "right_hand", "rh": "right_hand", "righthand": "right_hand",
+    "left": "left_hand", "l": "left_hand", "lh": "left_hand", "lefthand": "left_hand",
+    "rf": "right_foot", "rightfoot": "right_foot", "lf": "left_foot", "leftfoot": "left_foot",
+    "pelvis": "hips", "hip": "hips",
+}
+
+
+def key_bone(item):
+    """패널 키의 부위 이름을 KEY_BONES 중 하나로. "bone"이 없으면 예전 "hand"(right/left)를 본다."""
+    raw = str(item.get("bone") or item.get("hand") or "right_hand").strip().lower().replace("-", "_").replace(" ", "_")
+    bone = BONE_ALIASES.get(raw.replace("_", ""), raw)
+    if bone not in KEY_BONES:
+        raise ValueError(f"Unknown key part '{raw}'. Use one of: {', '.join(KEY_BONES)}.")
+    return bone
 
 
 def parse_hand_keys(value):
-    """C++ 패널의 손 키프레임 목록 → [{"time": 초, "hand": "right"|"left", "offset": [오른쪽, 위, 앞] (m)}].
-    패널은 offset을 cm로 보낸다. 같은 손·같은 프레임에 두 개면 나중 것만 쓰도록 워커가 정리한다."""
+    """C++ 패널의 Body keys → [{"time": 초, "bone": KEY_BONES 중 하나, "offset": [오른쪽, 위, 앞] (m)}].
+    패널은 offset을 cm로 보낸다. 같은 부위·같은 프레임에 두 개면 나중 것만 쓰도록 워커가 정리한다."""
     keys = []
     for item in value or []:
         try:
@@ -501,12 +518,11 @@ def parse_hand_keys(value):
             continue
         if not math.isfinite(time_s) or time_s < 0 or len(offset) != 3 or not all(map(math.isfinite, offset)):
             continue
-        hand = "left" if str(item.get("hand", "right")).lower().startswith("l") else "right"
-        keys.append({"time": round(time_s, 3), "hand": hand, "offset": offset})
-    keys.sort(key=lambda k: (k["hand"], k["time"]))
-    for hand in ("right", "left"):
-        if sum(1 for k in keys if k["hand"] == hand) > MAX_HAND_KEYS:
-            raise ValueError(f"Use at most {MAX_HAND_KEYS} keys per hand (Kimodo works best with fewer than 20).")
+        keys.append({"time": round(time_s, 3), "bone": key_bone(item), "offset": offset})
+    keys.sort(key=lambda k: (KEY_BONES.index(k["bone"]), k["time"]))
+    for bone in KEY_BONES:
+        if sum(1 for k in keys if k["bone"] == bone) > MAX_HAND_KEYS:
+            raise ValueError(f"Use at most {MAX_HAND_KEYS} keys per part (Kimodo works best with fewer than 20).")
     return keys
 
 
@@ -911,10 +927,10 @@ class Panel:
             return
         take = self.selected_take()
         if take is None:
-            raise ValueError("Select the take to use as the base for hand keys.")
+            raise ValueError("Select the take to use as the base for body keys.")
         keys = parse_hand_keys(config.get("hand_keys"))
         if not keys:
-            raise ValueError("Add at least one hand key.")
+            raise ValueError("Add at least one body key.")
         glb = (take.get("source") or {}).get("glb") or ""
         base = Path(glb).with_name("SOMA.npz") if glb else None
         if base is None or not base.is_file():
@@ -923,12 +939,12 @@ class Panel:
         seconds = take.get("seconds") or math.ceil(take["duration"] * 10 - 1e-6) / 10
         late = [f"{k['time']:g}s" for k in keys if k["time"] >= seconds]
         if late:
-            raise ValueError(f"Hand keys must be inside the take ({seconds:g}s): {', '.join(late)}")
+            raise ValueError(f"Body keys must be inside the take ({seconds:g}s): {', '.join(late)}")
         prompt = take.get("english") or take.get("prompt") or ""
         keyed = dict(config, seed=str(take["seed"]), count=1, agents=[],
                      steps=take.get("steps") or config.get("steps"))
         self.start(prompt, str(seconds), False, keyed, hand_keys={"base": str(base), "keys": keys},
-                   label=f"{take.get('prompt') or prompt} → {len(keys)} hand key{'s' if len(keys) != 1 else ''}")
+                   label=f"{take.get('prompt') or prompt} → {len(keys)} key{'s' if len(keys) != 1 else ''}")
 
     def start(self, prompt, duration_text, revision, config, hand_keys=None, label=""):
         if self.process is not None:

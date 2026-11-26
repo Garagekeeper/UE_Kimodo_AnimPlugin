@@ -173,7 +173,7 @@ const FEncoderOption& GetEncoderOption(EKimodoTextEncoderDevice Value)
 struct FHandKey
 {
 	float Time = 0.0f;
-	bool bLeft = false;
+	EKimodoKeyBone Bone = EKimodoKeyBone::RightHand;
 	float Right = 0.0f;
 	float Up = 0.0f;
 	float Forward = 0.0f;
@@ -325,6 +325,13 @@ private:
 			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8, 8, 4, 0)
 			[
 				SAssignNew(Preview, SKimodoPreview)
+				// 미리보기에서 손 키 핸들을 끌면 그 키의 오프셋(cm)을 바로 바꾼다(칸은 값을 직접 읽어 따라온다).
+				.OnHandKeyDragged_Lambda([this](int32 Index, const FVector& Offset) {
+					if (!HandKeys.IsValidIndex(Index)) return;
+					HandKeys[Index].Right = FMath::RoundToFloat(Offset.X);
+					HandKeys[Index].Up = FMath::RoundToFloat(Offset.Y);
+					HandKeys[Index].Forward = FMath::RoundToFloat(Offset.Z);
+				})
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(8, 6, 4, 8)
 			[
@@ -758,7 +765,7 @@ private:
 	TSharedRef<SWidget> MakeHandKeysArea()
 	{
 		return SNew(SExpandableArea)
-			.AreaTitle(LOCTEXT("HandKeys", "Hand keys"))
+			.AreaTitle(LOCTEXT("HandKeys", "Body keys (hands, feet, hips)"))
 			.InitiallyCollapsed(true)
 			.AllowAnimatedTransition(false)
 			.Visibility_Lambda([this] { return bCanRevise ? EVisibility::Visible : EVisibility::Collapsed; })
@@ -772,7 +779,9 @@ private:
 					SNew(STextBlock)
 					.AutoWrapText(true)
 					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-					.Text(LOCTEXT("HandKeysHelp", "Move a hand at given times, relative to the selected take's pose (cm: right / up / forward from the character). "
+					.Text(LOCTEXT("HandKeysHelp", "Move a hand, foot or the hips at given times, relative to the selected take's pose (cm: right / up / forward from the character). "
+						"Kimodo can pin only these five parts; moving the hips moves the whole body (e.g. lower it to crouch). "
+						"Select a key (radio button) and drag its yellow handle in the preview; turn the camera to move it forward or back. "
 						"Generate with keys keeps the take's prompt, seed, length and steps and adds a new take. Fewer than 20 keys per hand work best."))
 				]
 				+ SVerticalBox::Slot().AutoHeight()
@@ -786,9 +795,10 @@ private:
 					[
 						SNew(SButton)
 						.Text(LOCTEXT("AddHandKey", "+ Key at playhead"))
-						.ToolTipText(LOCTEXT("AddHandKeyTip", "Add a right-hand key at the preview's current time (pause the preview where you want it)."))
+						.ToolTipText(LOCTEXT("AddHandKeyTip", "Add a key at the preview's current time (pause the preview where you want it). Pick the part (RH, LH, RF, LF, Hip) on its row."))
 						.OnClicked_Lambda([this] {
-							HandKeys.Add({ FMath::RoundToFloat(Preview->GetTime() * 10.0f) / 10.0f, false, 0.0f, 0.0f, 0.0f });
+							HandKeys.Add({ FMath::RoundToFloat(Preview->GetTime() * 10.0f) / 10.0f, EKimodoKeyBone::RightHand, 0.0f, 0.0f, 0.0f });
+							SelectedHandKey = HandKeys.Num() - 1;  // 바로 미리보기에서 끌 수 있게 새 키를 고른다
 							RebuildHandKeyRows();
 							return FReply::Handled();
 						})
@@ -805,8 +815,9 @@ private:
 							int32 Index = 0;
 							for (float Time = 0.9f; Time < Length - 0.35f && Index < 19; Time += 0.6f, ++Index)
 							{
-								HandKeys.Add({ FMath::RoundToFloat(Time * 10.0f) / 10.0f, false, Index % 2 == 0 ? 30.0f : -30.0f, 5.0f, 0.0f });
+								HandKeys.Add({ FMath::RoundToFloat(Time * 10.0f) / 10.0f, EKimodoKeyBone::RightHand, Index % 2 == 0 ? 30.0f : -30.0f, 5.0f, 0.0f });
 							}
+							SelectedHandKey = INDEX_NONE;
 							RebuildHandKeyRows();
 							return FReply::Handled();
 						})
@@ -818,6 +829,7 @@ private:
 						.IsEnabled_Lambda([this] { return HandKeys.Num() > 0; })
 						.OnClicked_Lambda([this] {
 							HandKeys.Reset();
+							SelectedHandKey = INDEX_NONE;
 							RebuildHandKeyRows();
 							return FReply::Handled();
 						})
@@ -835,7 +847,7 @@ private:
 								? FText::Format(LOCTEXT("GenerateKeyed", "Generate with keys (#{0})"), FText::AsNumber(Take->Number))
 								: LOCTEXT("GenerateKeyedNone", "Generate with keys");
 						})
-						.ToolTipText(LOCTEXT("GenerateKeyedTip", "Regenerate the selected take with these hand keys. The result is added as a new take."))
+						.ToolTipText(LOCTEXT("GenerateKeyedTip", "Regenerate the selected take with these body keys. The result is added as a new take."))
 						.IsEnabled_Lambda([this] {
 							return !bBusy && IsReady() && bCanRevise && GetSelectedTake().IsValid() && HandKeys.Num() > 0 && !TargetMeshPath.IsEmpty();
 						})
@@ -845,10 +857,32 @@ private:
 			];
 	}
 
+	/** 키 목록과 선택을 미리보기에 넘겨 목표 위치 표시·드래그 핸들을 갱신한다. */
+	void SyncHandKeysToPreview()
+	{
+		if (!Preview.IsValid()) return;
+		TArray<FKimodoHandTarget> Targets;
+		for (const FHandKey& Key : HandKeys)
+		{
+			Targets.Add({ Key.Time, Key.Bone, FVector(Key.Right, Key.Up, Key.Forward) });
+		}
+		Preview->SetHandKeys(Targets, SelectedHandKey);
+	}
+
+	/** 키를 골라 미리보기를 그 시각으로 옮긴다. 노란 핸들을 끌어 위치를 정한다. */
+	void SelectHandKey(int32 Index)
+	{
+		SelectedHandKey = HandKeys.IsValidIndex(Index) ? Index : INDEX_NONE;
+		if (HandKeys.IsValidIndex(SelectedHandKey) && Preview.IsValid()) Preview->Scrub(HandKeys[SelectedHandKey].Time);
+		SyncHandKeysToPreview();
+	}
+
 	/** 손 키프레임 한 줄씩 다시 그린다(추가·삭제·프리셋 때). 값은 칸에서 바로 HandKeys에 반영한다. */
 	void RebuildHandKeyRows()
 	{
 		if (!HandKeyRows.IsValid()) return;
+		if (!HandKeys.IsValidIndex(SelectedHandKey)) SelectedHandKey = INDEX_NONE;
+		SyncHandKeysToPreview();
 		HandKeyRows->ClearChildren();
 		if (HandKeys.IsEmpty())
 		{
@@ -866,7 +900,13 @@ private:
 				.MinValue(Min).MaxValue(Max).Delta(Field == &FHandKey::Time ? 0.1f : 1.0f)
 				.ToolTipText(Tip)
 				.Value_Lambda([this, Index, Field] { return HandKeys.IsValidIndex(Index) ? HandKeys[Index].*Field : 0.0f; })
-				.OnValueChanged_Lambda([this, Index, Field](float Value) { if (HandKeys.IsValidIndex(Index)) HandKeys[Index].*Field = Value; })
+				.OnValueChanged_Lambda([this, Index, Field](float Value) {
+					if (!HandKeys.IsValidIndex(Index)) return;
+					HandKeys[Index].*Field = Value;
+					// 고른 키의 시각을 바꾸면 미리보기도 그 시각으로 따라간다.
+					if (Field == &FHandKey::Time && Index == SelectedHandKey && Preview.IsValid()) Preview->Scrub(Value);
+					SyncHandKeysToPreview();
+				})
 			];
 		};
 		for (int32 Index = 0; Index < HandKeys.Num(); ++Index)
@@ -874,6 +914,15 @@ private:
 			HandKeyRows->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
 			[
 				SNew(SHorizontalBox)
+				// 선택(●): 미리보기를 이 키의 시각으로 옮기고, 노란 핸들을 끌어 손 위치를 정한다.
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+				[
+					SNew(SCheckBox)
+					.Style(FAppStyle::Get(), "RadioButton")
+					.ToolTipText(LOCTEXT("SelectKeyTip", "Select this key: the preview jumps to its time and shows a yellow handle you can drag."))
+					.IsChecked_Lambda([this, Index] { return SelectedHandKey == Index ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+					.OnCheckStateChanged_Lambda([this, Index](ECheckBoxState) { SelectHandKey(Index); })
+				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
 				[
 					Number(Index, &FHandKey::Time, 0.0f, 60.0f, LOCTEXT("KeyTimeTip", "Time in seconds"))
@@ -884,11 +933,19 @@ private:
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
 				[
-					SNew(SSegmentedControl<bool>)
-					.Value_Lambda([this, Index] { return HandKeys.IsValidIndex(Index) && HandKeys[Index].bLeft; })
-					.OnValueChanged_Lambda([this, Index](bool bLeft) { if (HandKeys.IsValidIndex(Index)) HandKeys[Index].bLeft = bLeft; })
-					+ SSegmentedControl<bool>::Slot(false).Text(LOCTEXT("RightHand", "R"))
-					+ SSegmentedControl<bool>::Slot(true).Text(LOCTEXT("LeftHand", "L"))
+					// 부위: 오른손·왼손·오른발·왼발·골반(Kimodo가 위치를 받는 부위)
+					SNew(SSegmentedControl<EKimodoKeyBone>)
+					.Value_Lambda([this, Index] { return HandKeys.IsValidIndex(Index) ? HandKeys[Index].Bone : EKimodoKeyBone::RightHand; })
+					.OnValueChanged_Lambda([this, Index](EKimodoKeyBone Bone) {
+						if (!HandKeys.IsValidIndex(Index)) return;
+						HandKeys[Index].Bone = Bone;
+						SyncHandKeysToPreview();
+					})
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::RightHand).Text(LOCTEXT("PartRightHand", "RH")).ToolTip(LOCTEXT("PartRightHandTip", "Right hand"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::LeftHand).Text(LOCTEXT("PartLeftHand", "LH")).ToolTip(LOCTEXT("PartLeftHandTip", "Left hand"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::RightFoot).Text(LOCTEXT("PartRightFoot", "RF")).ToolTip(LOCTEXT("PartRightFootTip", "Right foot"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::LeftFoot).Text(LOCTEXT("PartLeftFoot", "LF")).ToolTip(LOCTEXT("PartLeftFootTip", "Left foot"))
+					+ SSegmentedControl<EKimodoKeyBone>::Slot(EKimodoKeyBone::Hips).Text(LOCTEXT("PartHips", "Hip")).ToolTip(LOCTEXT("PartHipsTip", "Hips (pelvis): moves the whole body, e.g. lower it to crouch"))
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
 				[
@@ -909,6 +966,8 @@ private:
 					.ToolTipText(LOCTEXT("RemoveHandKey", "Remove this key"))
 					.OnClicked_Lambda([this, Index] {
 						if (HandKeys.IsValidIndex(Index)) HandKeys.RemoveAt(Index);
+						if (SelectedHandKey == Index) SelectedHandKey = INDEX_NONE;
+						else if (SelectedHandKey > Index) --SelectedHandKey;
 						RebuildHandKeyRows();
 						return FReply::Handled();
 					})
@@ -1368,7 +1427,8 @@ private:
 		{
 			TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
 			Item->SetNumberField(TEXT("time"), Key.Time);
-			Item->SetStringField(TEXT("hand"), Key.bLeft ? TEXT("left") : TEXT("right"));
+			static const TCHAR* BoneNames[] = { TEXT("right_hand"), TEXT("left_hand"), TEXT("right_foot"), TEXT("left_foot"), TEXT("hips") };
+			Item->SetStringField(TEXT("bone"), BoneNames[FMath::Clamp(static_cast<int32>(Key.Bone), 0, 4)]);
 			TArray<TSharedPtr<FJsonValue>> Offset;
 			Offset.Add(MakeShared<FJsonValueNumber>(Key.Right));
 			Offset.Add(MakeShared<FJsonValueNumber>(Key.Up));
@@ -1691,6 +1751,8 @@ private:
 	/** 손 키프레임 목록과 그 줄들을 담는 상자(Hand keys). */
 	TArray<FHandKey> HandKeys;
 	TSharedPtr<SVerticalBox> HandKeyRows;
+	/** 미리보기에서 드래그할 수 있는 키(●). INDEX_NONE이면 선택 없음. */
+	int32 SelectedHandKey = INDEX_NONE;
 	TSharedPtr<SEditableTextBox> AssetName;
 	TSharedPtr<SEditableTextBox> SaveFolder;
 	TSharedPtr<SComboButton> FolderPicker;

@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- **Hand keys** (under Takes): set where the right or left hand should be at given times, relative to the selected take's pose (cm right / up / forward), and regenerate with Kimodo hand constraints using the take's prompt, seed, length and steps. Includes `+ Key at playhead` and a `Big wave preset` (big, slow hello wave: 25 cm → 67 cm swing in the test case). Takes remember their keys and requested length.
+- **Body keys** (under Takes): set where a hand, a foot or the hips (the five parts Kimodo can pin) should be at given times; a hips key also moves the body's ground position and height, so lowering it crouches. Hand keys first: set where the right or left hand should be at given times, relative to the selected take's pose (cm right / up / forward), and regenerate with Kimodo hand constraints using the take's prompt, seed, length and steps. Select a key to jump the preview to its time and drag its yellow handle in the preview (camera-facing plane) to set the offset; other keys show as cyan markers. Includes `+ Key at playhead` and a `Big wave preset` (big, slow hello wave: 25 cm → 67 cm swing in the test case). Takes remember their keys and requested length.
 - `Advanced > Steps`: diffusion step count (1-1000, default 100, `Default` button). Takes remember their step count, and takes not made with 100 steps show it in the status line. Same seed + steps + duration + model reproduces a take; the worker gives byte-identical output to the Kimodo CLI's `--diffusion_steps`.
 
 ## 1.1.1 — 2026-11-25

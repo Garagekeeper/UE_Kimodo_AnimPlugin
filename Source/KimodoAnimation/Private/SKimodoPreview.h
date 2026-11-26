@@ -13,10 +13,25 @@ protected:
 	FAdvancedPreviewScene Scene{FPreviewScene::ConstructionValues().SetCreatePhysicsScene(false).SetTransactional(false)};
 };
 
+/** Body keys가 정할 수 있는 부위(Kimodo end-effector: 양손·양발·골반). 패널·Python과 같은 순서. */
+enum class EKimodoKeyBone : uint8 { RightHand, LeftHand, RightFoot, LeftFoot, Hips };
+
+/** 미리보기에 표시·드래그할 키프레임. Offset은 cm(캐릭터 기준 X=오른쪽, Y=위, Z=앞). */
+struct FKimodoHandTarget
+{
+	float Time = 0.0f;
+	EKimodoKeyBone Bone = EKimodoKeyBone::RightHand;
+	FVector Offset = FVector::ZeroVector;
+};
+
+/** 손 키 핸들을 드래그해 오프셋이 바뀌었을 때(키 번호, 새 오프셋 cm). */
+DECLARE_DELEGATE_TwoParams(FOnKimodoHandKeyDragged, int32, const FVector&);
+
 class SKimodoPreview : private FKimodoPreviewSceneOwner, public SEditorViewport
 {
 public:
 	SLATE_BEGIN_ARGS(SKimodoPreview) {}
+		SLATE_EVENT(FOnKimodoHandKeyDragged, OnHandKeyDragged)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& Args);
@@ -38,6 +53,15 @@ public:
 	float GetLength() const { return Length; }
 	bool IsPlaying() const { return bPlaying; }
 
+	/** 손 키 목록과 선택한 키(-1이면 없음). 각 키의 목표 위치에 표시를 그리고, 선택한 키는 드래그할 수 있다. */
+	void SetHandKeys(const TArray<FKimodoHandTarget>& InKeys, int32 InSelected);
+	/** 좌클릭이 선택한 키 핸들 근처면 드래그를 시작한다(위젯 로컬 좌표). */
+	bool TryBeginKeyDrag(const FVector2D& LocalPosition, const FVector2D& LocalSize);
+	/** 마우스 이동량만큼 선택한 키를 카메라와 마주 보는 평면에서 옮긴다. */
+	void DragKey(const FVector2D& LocalDelta, const FVector2D& LocalSize);
+	void EndKeyDrag() { bDraggingKey = false; }
+	bool IsDraggingKey() const { return bDraggingKey; }
+
 protected:
 	TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override;
 	void Tick(const FGeometry& Geometry, double CurrentTime, float DeltaTime) override;
@@ -51,6 +75,27 @@ private:
 	void ApplyRootMotion();
 	/** 루트 모션 경로를 바닥에 선으로 그린다. 루트 모션이 없으면 지운다. */
 	void DrawRootMotionPath();
+	/** Time 시점의 손 위치와 캐릭터 기준 방향(오른쪽·앞, 수평)을 읽는다. 카메라는 건드리지 않는다. */
+	bool SampleHand(float SampleTime, EKimodoKeyBone Bone, FVector& OutHand, FVector& OutRight, FVector& OutForward);
+	/** 키마다 기준 손 위치·방향을 다시 계산하고 표시를 그린다(클립·키가 바뀔 때). */
+	void RefreshKeyMarkers();
+	void DrawKeyMarkers();
+	FVector KeyTarget(int32 Index) const;
+	FVector2D ProjectToLocal(const FVector& World, const FVector2D& LocalSize, bool& bInFront) const;
+
+	struct FKeyBasis
+	{
+		FVector Hand = FVector::ZeroVector;
+		FVector Right = FVector::RightVector;
+		FVector Forward = FVector::ForwardVector;
+	};
+	TArray<FKimodoHandTarget> HandKeys;
+	TArray<FKeyBasis> KeyBases;
+	int32 SelectedKey = INDEX_NONE;
+	bool bDraggingKey = false;
+	FOnKimodoHandKeyDragged OnHandKeyDragged;
+	ULineBatchComponent* KeyMarkers = nullptr;
+
 	UDebugSkelMeshComponent* Mesh = nullptr;
 	ULineBatchComponent* RootPath = nullptr;
 	const UAnimSequence* CurrentClip = nullptr;
