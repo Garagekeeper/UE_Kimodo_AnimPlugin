@@ -1152,8 +1152,8 @@ private:
 					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 					.Text(LOCTEXT("HandKeysHelp", "Move a hand, foot or the hips at given times, relative to the selected take's pose (cm: right / up / forward from the character). "
 						"Kimodo can pin only these five parts; moving the hips moves the whole body (e.g. lower it to crouch). "
-						"Pick a key on the timeline under the preview (diamonds); in the preview, drag an arrow (red right, green up, blue forward) or the center to move it. "
-						"Generate with keys keeps the take's prompt, seed, length and steps and adds a new take. Fewer than 20 keys per hand work best."))
+						"Pick a key on the timeline under the preview (diamonds); in the preview, drag the move gizmo (red forward, green right, blue up) to move it. "
+						"Each take keeps its own keys. Generate with keys keeps the take's prompt, seed, length and steps and adds a new take. Fewer than 20 keys per part work best."))
 				]
 				+ SVerticalBox::Slot().AutoHeight()
 				[
