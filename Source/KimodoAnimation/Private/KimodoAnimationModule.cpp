@@ -465,7 +465,7 @@ struct FKimodoTake
 	FString Target;
 	/** 프리뷰가 메모리에 올라와 있는지. 아니면 고를 때 원본 glTF를 다시 가져온다. */
 	bool bLoaded = false;
-	/** 이 테이크의 Body keys(편집한 키, 없으면 이 테이크를 만들 때 쓴 키). */
+	/** 이 테이크를 기준으로 편집한 Body keys(키로 만든 새 테이크는 빈 목록에서 시작). */
 	TArray<FHandKey> Keys;
 };
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- Preview camera: holding the right mouse button with WASD / QE flies the camera again (left-drag still orbits); after flying, the orbit center moves in front of the camera.
+- A take made with `Generate with keys` starts with no keys. Its pose already includes the key offsets, so reusing the same keys would apply them twice; the keys stay on the base take.
+- Panel Body keys help text describes the engine gizmo colors (red forward, green right, blue up).
+
 ## 1.2.0 — 2026-11-26
 
 ### Added

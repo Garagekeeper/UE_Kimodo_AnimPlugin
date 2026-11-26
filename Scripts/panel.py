@@ -543,18 +543,11 @@ def clean_panel_keys(value):
 
 
 def panel_keys(take):
-    """테이크에 보여 줄 Body keys(cm). 편집한 키가 있으면 그것, 없으면 이 테이크를 만들 때 쓴 키(m → cm)."""
-    if take.get("edit_keys") is not None:
-        return take["edit_keys"]
-    keys = []
-    # 예전 테이크는 "bone" 대신 "hand"(right/left)로 남아 있다. 읽을 수 없는 항목은 건너뛴다.
-    for k in take.get("hand_keys") or []:
-        try:
-            keys.append({"time": float(k["time"]), "bone": key_bone(k),
-                         "offset": [round(float(v) * 100.0, 2) for v in k["offset"]][:3]})
-        except (KeyError, TypeError, ValueError, AttributeError):
-            continue
-    return keys
+    """테이크에 보여 줄 Body keys(cm): 이 테이크를 기준으로 편집한 키. 없으면 빈 목록.
+
+    키 오프셋은 기준 테이크의 포즈에서 얼마나 옮길지라, 키로 만든 테이크(이미 옮겨진 포즈)에
+    만들 때 쓴 키(hand_keys)를 다시 보여 주면 오프셋이 두 번 들어간다. hand_keys는 기록으로만 남긴다."""
+    return take.get("edit_keys") or []
 
 
 def take_summary(take):

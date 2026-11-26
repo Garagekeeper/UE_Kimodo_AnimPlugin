@@ -100,7 +100,15 @@ public:
 		EngineShowFlags.SetModeWidgets(true);
 	}
 
-	bool ShouldOrbitCamera() const override { return true; }
+	/** 좌클릭 드래그·휠은 궤도 카메라. 우클릭(가운데 버튼)을 누르고 있으면 엔진 비행 모드(WASD·QE)로 넘긴다. */
+	bool ShouldOrbitCamera() const override
+	{
+		if (Viewport && (Viewport->KeyState(EKeys::RightMouseButton) || Viewport->KeyState(EKeys::MiddleMouseButton)))
+		{
+			return FEditorViewportClient::ShouldOrbitCamera();
+		}
+		return true;
+	}
 
 	UE::Widget::EWidgetMode GetWidgetMode() const override
 	{
@@ -141,6 +149,8 @@ public:
 
 	void TrackingStarted(const FInputEventState& InInputState, bool bIsDraggingWidget, bool bNudge) override
 	{
+		bFlying = !bIsDraggingWidget && (InInputState.IsRightMouseButtonPressed() || InInputState.IsMiddleMouseButtonPressed());
+		FlyOrbitDistance = FMath::Max((GetLookAtLocation() - GetViewLocation()).Size(), 50.0);
 		if (const TSharedPtr<SKimodoPreview> Preview = Owner.Pin())
 		{
 			if (bIsDraggingWidget) Preview->SetDraggingKey(true);
@@ -150,15 +160,24 @@ public:
 
 	void TrackingStopped() override
 	{
+		// 비행 뒤에는 궤도 중심을 카메라 앞(비행 전과 같은 거리)으로 옮겨, 다음 좌클릭 궤도가 옛 중심으로 튀지 않게 한다.
+		if (bFlying)
+		{
+			SetLookAtLocation(GetViewLocation() + GetViewRotation().Vector() * FlyOrbitDistance);
+			bFlying = false;
+		}
 		if (const TSharedPtr<SKimodoPreview> Preview = Owner.Pin())
 		{
 			Preview->SetDraggingKey(false);
 			Preview->SetOrbiting(false);
+			Preview->SyncFromViewportCamera();
 		}
 	}
 
 private:
 	TWeakPtr<SKimodoPreview> Owner;
+	bool bFlying = false;
+	double FlyOrbitDistance = 400.0;
 };
 
 /** 메시에서 첫 번째로 있는 본 이름(UE 마네킹과 SOMA/믹사모식 이름 모두 시도). */
